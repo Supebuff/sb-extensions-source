@@ -3,6 +3,7 @@
 /.idea/workspace.xml
 .DS_Store
 build/
+/gradle/build-logic/bin/
 /captures
 .idea/
 *.iml
