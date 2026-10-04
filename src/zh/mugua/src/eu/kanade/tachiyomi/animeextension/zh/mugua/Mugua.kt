@@ -8,9 +8,11 @@ import eu.kanade.tachiyomi.animesource.model.FetchType
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import extensions.utils.Source
 import extensions.utils.asJsoup
+import keiyoushi.utils.addListPreference
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Response
 
@@ -22,7 +24,7 @@ class Mugua : Source() {
 
     override val lang = "zh"
 
-    override val supportsLatest = false
+    override val supportsLatest = true
 
     private val pageUrls = mutableMapOf<String, MutableMap<Int, String>>()
 
@@ -30,6 +32,11 @@ class Mugua : Source() {
         .add("Referer", "$baseUrl/")
 
     override suspend fun getPopularAnime(page: Int): AnimesPage = fetchListing("$baseUrl/", page)
+
+    override suspend fun getLatestUpdates(page: Int): AnimesPage {
+        val tag = preferences.getString(PREF_LATEST_CATEGORY_KEY, DEFAULT_LATEST_CATEGORY) ?: DEFAULT_LATEST_CATEGORY
+        return fetchListing(tagListingUrl(tag), page)
+    }
 
     override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
         val listingUrl = if (query.isNotBlank()) {
@@ -41,14 +48,7 @@ class Mugua : Source() {
             val tag = filters.filterIsInstance<TagFilter>().firstOrNull { it.selectedTag().isNotBlank() }
                 ?.selectedTag()
                 ?: ""
-            if (tag.isBlank()) {
-                "$baseUrl/"
-            } else {
-                "$baseUrl/tag.jsp".toHttpUrl().newBuilder()
-                    .addQueryParameter("t", tag)
-                    .build()
-                    .toString()
-            }
+            tagListingUrl(tag)
         }
 
         return fetchListing(listingUrl, page)
@@ -123,15 +123,79 @@ class Mugua : Source() {
         title = anime.title
         url = anime.url
         thumbnail_url = anime.thumbnail_url
-        description = "此來源僅提供目錄瀏覽，不提供影片播放。"
+        description = "單集 720p HLS 播放。"
+        fetch_type = FetchType.Episodes
         initialized = true
     }
 
-    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> = emptyList()
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> = listOf(
+        SEpisode.create().apply {
+            name = "單集"
+            episode_number = 1.0f
+            url = anime.url
+        },
+    )
 
-    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = emptyList()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = listOf(
+        Hoster(hosterName = "720p", hosterUrl = episode.url),
+    )
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) = Unit
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = try {
+        val pageUrl = absoluteUrl(hoster.hosterUrl)
+        val html = client.newCall(GET(pageUrl, headers)).execute().use { it.body.string() }
+        val videoUrl = extractVideoUrl(html) ?: return emptyList()
+        val videoHeaders = headers.newBuilder()
+            .set("Referer", pageUrl)
+            .build()
+
+        listOf(
+            Video(
+                videoUrl = videoUrl,
+                videoTitle = "720p",
+                headers = videoHeaders,
+                preferred = true,
+            ),
+        )
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        screen.addListPreference(
+            key = PREF_LATEST_CATEGORY_KEY,
+            default = DEFAULT_LATEST_CATEGORY,
+            title = "最新來源分類",
+            summary = "%s",
+            entries = CATEGORIES.map { it.first },
+            entryValues = CATEGORIES.map { it.second },
+        )
+    }
+
+    private fun tagListingUrl(tag: String): String = if (tag.isBlank()) {
+        "$baseUrl/"
+    } else {
+        "$baseUrl/tag.jsp".toHttpUrl().newBuilder()
+            .addQueryParameter("t", tag)
+            .build()
+            .toString()
+    }
+
+    private fun absoluteUrl(url: String): String = if (url.startsWith("http")) {
+        url
+    } else {
+        "$baseUrl/${url.trimStart('/')}"
+    }
+
+    private fun extractVideoUrl(html: String): String? = OBFUSCATED_SCRIPT_REGEX.findAll(html)
+        .firstNotNullOfOrNull { match ->
+            val decoded = decodeXor128(match.groupValues[1])
+            PLAYER_VIDEO_URL_REGEX.find(decoded)?.groupValues?.get(1)
+                ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+        }
+
+    private fun decodeXor128(value: String): String = buildString(value.length) {
+        value.forEach { append((it.code xor 0x80).toChar()) }
+    }
 
     private class TagFilter(
         name: String,
@@ -141,6 +205,14 @@ class Mugua : Source() {
     }
 
     companion object {
+        private const val PREF_LATEST_CATEGORY_KEY = "latest_category"
+        private const val DEFAULT_LATEST_CATEGORY = ""
+
+        private val OBFUSCATED_SCRIPT_REGEX =
+            """eval\s*\(\s*I\(\s*["']([\s\S]*?)["']\s*\)\s*\)""".toRegex()
+        private val PLAYER_VIDEO_URL_REGEX =
+            """video\s*:\s*\{\s*url\s*:\s*["']([^"']+\.m3u8(?:\?[^"']*)?)["']""".toRegex(RegexOption.IGNORE_CASE)
+
         private val CATEGORIES = arrayOf(
             "全部" to "",
             "国产精品" to "5y9kg97rdzxe",

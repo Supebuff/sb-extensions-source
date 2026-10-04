@@ -11,5 +11,6 @@
             "name": "JavaSE-21",
             "path": "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.12.101-hotspot"
         }
-    ]
+    ],
+    "java.compile.nullAnalysis.mode": "automatic"
 }
