@@ -2,264 +2,132 @@ name: CI
 
 on:
   push:
-    branches:
-      - master
-    paths:
-      - '**'
-      - '!**.md'
-      - '!.github/**'
-      - '.github/scripts/**'
-      - '.github/workflows/build_push.yml'
-  # Manual trigger
+    branches: [dev]
+  pull_request:
+    branches: [dev]
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+    inputs:
+      scope:
+        description: Extensions to build
+        type: choice
+        default: mugua
+        options: [mugua, changed, all]
 
 permissions:
-  contents: write
+  contents: read
 
-env:
-  CI_CHUNK_SIZE: 128
-  IS_PR_CHECK: false
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   prepare:
-    name: Prepare job
-    runs-on: 'ubuntu-24.04'
-    timeout-minutes: 15
+    name: Validate CI and select modules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
-      latestCommitMessage: ${{ steps.set-env.outputs.LATEST_COMMIT_MESSAGE }}
-      matrix: ${{ steps.generate-matrices.outputs.matrix }}
-      delete: ${{ steps.generate-matrices.outputs.delete }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_build: ${{ steps.plan.outputs.has_build }}
     steps:
-      - name: Checkout ${{ github.ref_name }} branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set env
-        id: set-env
-        run: |
-          DELIMITER="$(openssl rand -hex 16)"
-          echo "LATEST_COMMIT_MESSAGE<<$DELIMITER" >> "$GITHUB_OUTPUT"
-          git log -1 --pretty=%B >> "$GITHUB_OUTPUT"
-          echo "" >> "$GITHUB_OUTPUT"
-          echo "Built on commit: $(git log -1 --pretty=%H)" >> "$GITHUB_OUTPUT"
-          echo "$DELIMITER" >> "$GITHUB_OUTPUT"
-
-      - name: Find lib changes
-        id: modified-libs
-        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          files: |
-            lib/
-            lib-multisrc/
-          files_ignore: |
-            lib/**.md
-            lib-multisrc/**.md
-          files_separator: " "
-          safe_output: false
-
-        # This step is going to commit, but this will not trigger another workflow.
-        # If any changes to lib/ caused on master branch, bump the extensions that uses the modified lib.
-      - name: Bump extensions that uses a modified lib
-        if: steps.modified-libs.outputs.any_changed == 'true'
+          python-version: '3.12'
+      - name: Validate workflow syntax
         env:
-          COMMIT_MESSAGE: ${{ steps.set-env.outputs.LATEST_COMMIT_MESSAGE }}
-          CHANGED_FILES: ${{ steps.modified-libs.outputs.all_changed_files }}
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         run: |
-          latest_commit_author=$(git log -1 --pretty=%an)
-          git config --local user.name "github-actions[bot]"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          chmod +x ./.github/scripts/bump-versions.py
-          ./.github/scripts/bump-versions.py "$COMMIT_MESSAGE" $CHANGED_FILES
-          git push
-
-      - name: Set up Java
-        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
-        with:
-          java-version: 17
-          distribution: temurin
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
-        with:
-          cache-read-only: true
-
-      - name: Run Spotless Apply
-        run: ./gradlew spotlessApply --continue || true
-
-      - name: Commit and push changes
-        uses: EndBug/add-and-commit@v10
-        with:
-          default_author: github_actions
-          message: 'Apply Spotless formatting'
-          commit: '--no-verify'
-
-      - name: Get last successful CI commit
-        id: last_successful_ci_commit
-        uses: nrwl/nx-set-shas@afb73a62d26e41464e9254689e1fd6122ee683c1 # v5.0.1
-        with:
-          main-branch-name: ${{ github.ref_name }}
-
-      - id: generate-matrices
-        name: Create output matrices
-        run: |
-          python ./.github/scripts/generate-build-matrices.py "${{ steps.last_successful_ci_commit.outputs.base || github.event.before || 'HEAD~1' }}" Release
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --location --retry 3 "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o "$archive"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/build_push.yml
+      - name: Test module selection
+        run: python -m unittest discover -s .github/tests -v
+      - name: Select build modules
+        id: plan
+        env:
+          BUILD_SCOPE: ${{ inputs.scope || 'changed' }}
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/upstream' }}
+          IS_PR_CHECK: 'true'
+          CI_CHUNK_SIZE: '18'
+          CI_MAX_RUNNERS: '4'
+        run: python .github/scripts/ci-matrix.py --scope "$BUILD_SCOPE" --base "$BASE_REF"
 
   build:
-    name: Build extensions (${{ matrix.chunk.number }})
+    name: Build APKs (${{ matrix.chunk.number }})
     needs: prepare
-    runs-on: 'ubuntu-24.04'
+    if: needs.prepare.outputs.has_build == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    if: ${{ toJson(fromJson(needs.prepare.outputs.matrix).chunk) != '[]' }}
     strategy:
+      fail-fast: false
+      max-parallel: 4
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
-      - name: Checkout ${{ github.ref_name }} branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
         with:
-          ref: ${{ github.ref_name }}
-
-      - name: Set up Java
-        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+          persist-credentials: false
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
-          java-version: 17
+          java-version: '17'
           distribution: temurin
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
-          cache-read-only: ${{ matrix.chunk.number > 1 }}
-
-      - name: Prepare signing key
-        run: |
-          echo ${{ secrets.SIGNING_KEY }} | base64 -d > signingkey.jks
-          chmod 600 signingkey.jks
-
-      - name: Build extensions (${{ matrix.chunk.number }})
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Build debug APKs and run core tests
         env:
-          ALIAS: ${{ secrets.ALIAS }}
-          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          MEGACLOUD_API: ${{ secrets.MEGACLOUD_API }}
-          KISSKH_API: ${{ secrets.KISSKH_API }}
-          KISSKH_SUB_API: ${{ secrets.KISSKH_SUB_API }}
-          KAISVA: ${{ secrets.KAISVA }}
-          TMDB_API: ${{ secrets.TMDB_API }}
+          BUILD_TASKS: ${{ toJSON(matrix.chunk.modules) }}
+          CHUNK_NUMBER: ${{ matrix.chunk.number }}
         run: |
-          ./gradlew $(echo '${{ toJson(matrix.chunk.modules) }}' | jq -r 'join(" ")')
-
-      - name: Upload APKs (${{ matrix.chunk.number }})
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: github.repository == 'salmanbappi/sb-extensions-source'
-        with:
-          name: "individual-apks-${{ matrix.chunk.number }}"
-          path: "src/**/build/outputs/apk/**/*.apk"
-          retention-days: 1
-          compression-level: 0
-
-      - name: Clean up CI files
-        if: always()
-        run: rm -f signingkey.jks
-
-  publish:
-    name: Publish extension repo
-    needs: [prepare, build]
-    if: |
-      github.repository == 'salmanbappi/sb-extensions-source' &&
-      !failure() &&
-      !cancelled() &&
-      (toJson(fromJson(needs.prepare.outputs.matrix).chunk) != '[]' || toJson(fromJson(needs.prepare.outputs.delete)) != '[]')
-    runs-on: 'ubuntu-24.04'
-    timeout-minutes: 15
-    steps:
-      - name: Download APK artifacts
-        if: ${{ toJson(fromJson(needs.prepare.outputs.matrix).chunk) != '[]' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: ~/apk-artifacts
-
-      - name: Set up JDK
-        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
-        with:
-          java-version: 17
-          distribution: temurin
-
-      - name: Checkout ${{ github.ref_name }} branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
-        with:
-          ref: ${{ github.ref_name }}
-          path: ${{ github.ref_name }}
-
-      - name: Create repo artifacts
-        run: |
-          cd ${{ github.ref_name }}
-          python ./.github/scripts/move-built-apks.py
-          if ls repo/apk/*.apk 1> /dev/null 2>&1; then
-            java -jar ./.github/scripts/Inspector.jar "repo/apk" "output.json" "tmp"
-            python ./.github/scripts/create-repo.py
-          else
-            mkdir -p repo/apk repo/icon
-            echo "[]" > repo/index.min.json
+          mapfile -t tasks < <(python3 -c 'import json, os; print("\n".join(json.loads(os.environ["BUILD_TASKS"])))')
+          if [[ "$CHUNK_NUMBER" == 1 ]]; then
+            tasks+=(":core:testDebugUnitTest")
           fi
-
-      - name: Checkout repo branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+          bash ./gradlew "${tasks[@]}" --no-daemon --continue --stacktrace --max-workers=2 -Dorg.gradle.jvmargs=-Xmx3g -Pkotlin.compiler.execution.strategy=in-process
+      - name: Upload debug APKs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          repository: salmanbappi/extensions-repo
-          token: ${{ secrets.BOT_PAT }}
-          ref: main
-          path: repo
-          fetch-depth: 0
+          name: debug-apks-${{ github.run_number }}-${{ matrix.chunk.number }}
+          path: src/**/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-diagnostics-${{ github.run_number }}-${{ matrix.chunk.number }}
+          path: |
+            **/build/reports/
+            **/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
 
-      - name: Merge repo
+  result:
+    name: CI result
+    if: always()
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require successful validation and builds
         env:
-          DELETED_MODULES: ${{ needs.prepare.outputs.delete }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          HAS_BUILD: ${{ needs.prepare.outputs.has_build }}
         run: |
-          cd repo
-          pip install --no-cache-dir protobuf
-          python ../${{ github.ref_name }}/.github/scripts/merge-repo.py "$DELETED_MODULES" '${{ github.ref_name }}/repo'
-
-      - name: Sync repo
-        env:
-          COMMIT_MESSAGE: ${{ needs.prepare.outputs.latestCommitMessage }}
-        run: |
-          cd repo
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin https://github.com/salmanbappi/extensions-repo.git
-          git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-          git fetch origin
-          git reset origin/main
-          git add -A
-          git commit --amend -m "$COMMIT_MESSAGE" --no-sign --allow-empty || echo "No changes to commit"
-          git push origin HEAD:main HEAD:repo --force
-
-      - name: Purge cached index on jsDelivr
-        run: |
-          sleep 5
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/index.json || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/index.min.json || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/index.html || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/index.pb || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/repo.json || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/index.json || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/index.min.json || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/index.html || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/index.pb || true
-          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/repo.json || true
-
-      - name: Create GitHub Release
-        working-directory: ${{ github.ref_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if ls repo/apk/*.apk 1> /dev/null 2>&1; then
-            gh release create "r-${{ github.run_number }}" repo/apk/*.apk --title "Release r-${{ github.run_number }}" --notes "Release for run ${{ github.run_number }}"
+          [[ "$PREPARE_RESULT" == success ]]
+          if [[ "$HAS_BUILD" == true ]]; then
+            [[ "$BUILD_RESULT" == success ]]
           else
-            echo "No APKs found to release"
+            [[ "$BUILD_RESULT" == skipped ]]
           fi
