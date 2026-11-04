@@ -12,6 +12,7 @@ import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
@@ -79,9 +80,9 @@ object ItemTypeSerializer : KSerializer<ItemType> {
 @Serializable data class ItemListDto(val items: List<ItemDto> = emptyList(), val totalRecordCount: Int = 0)
 
 @Serializable data class ItemDto(
-    val name: String,
+    val name: String = "",
     val type: ItemType? = ItemType.Other,
-    val id: String,
+    val id: String = "",
     val locationType: String? = null,
     val imageTags: ImageDto? = ImageDto(),
     val collectionType: String? = null,
@@ -311,11 +312,12 @@ object ItemTypeSerializer : KSerializer<ItemType> {
     }
 }
 
-@Serializable data class LoginDto(val accessToken: String, val sessionInfo: LoginSessionDto) {
-    @Serializable data class LoginSessionDto(val userId: String)
+@Serializable data class LoginDto(val accessToken: String = "", val sessionInfo: LoginSessionDto = LoginSessionDto()) {
+    @Serializable data class LoginSessionDto(val userId: String = "")
 }
 
 @Serializable data class MediaDto(
+    val name: String? = null,
     val size: Long? = null,
     val id: String? = null,
     val container: String? = null,
@@ -332,6 +334,9 @@ object ItemTypeSerializer : KSerializer<ItemType> {
     val channels: Int? = null,
     val width: Int? = null,
     val height: Int? = null,
+    val isExternal: Boolean? = null,
+    val deliveryUrl: String? = null,
+    val index: Int? = null,
 )
 
 fun Long.formatBytes(): String = when {
@@ -387,18 +392,18 @@ abstract class Jellyfin(
     open val hasCustomAuthSettings: Boolean = false
 
     override val baseUrl: String
-        get() = preferences.getString(PREF_BASE_URL, defaultBaseUrl)!!.removeSuffix("/")
+        get() = (preferences.getString(PREF_BASE_URL, defaultBaseUrl) ?: defaultBaseUrl).removeSuffix("/")
 
     open val username: String
         get() = if (hasCustomAuthSettings) {
-            preferences.getString(PREF_USERNAME, defaultUsername)!!
+            preferences.getString(PREF_USERNAME, defaultUsername) ?: defaultUsername
         } else {
             defaultUsername
         }
 
     open val password: String
         get() = if (hasCustomAuthSettings) {
-            preferences.getString(PREF_PASSWORD, defaultPassword)!!
+            preferences.getString(PREF_PASSWORD, defaultPassword) ?: defaultPassword
         } else {
             defaultPassword
         }
@@ -517,7 +522,7 @@ abstract class Jellyfin(
         val items = if (epUrl.contains("Episodes")) resp.parseAs<ItemListDto>(json).items else listOf(resp.parseAs<ItemDto>(json))
         val showThumbnails = preferences.getBoolean(PREF_SHOW_THUMBNAILS_KEY, true)
         val showSummary = preferences.getBoolean(PREF_SHOW_SUMMARY_KEY, true)
-        val episodeTemplate = preferences.getString(PREF_EPISODE_NAME_TEMPLATE_KEY, PREF_EPISODE_NAME_TEMPLATE_DEFAULT)!!
+        val episodeTemplate = preferences.getString(PREF_EPISODE_NAME_TEMPLATE_KEY, PREF_EPISODE_NAME_TEMPLATE_DEFAULT) ?: PREF_EPISODE_NAME_TEMPLATE_DEFAULT
         return items.map { it.toSEpisode(baseUrl, userId, showThumbnails, showSummary, episodeTemplate) }.reversed()
     }
 
@@ -533,9 +538,54 @@ abstract class Jellyfin(
     }
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val item = client.newCall(GET(episode.url)).await().parseAs<ItemDto>(json)
+        val detailUrl = episode.url.toHttpUrl().newBuilder()
+            .addQueryParameter("Fields", "MediaSources")
+            .build()
+        val item = client.newCall(GET(detailUrl)).await().parseAs<ItemDto>(json)
         val videoHeaders = Headers.headersOf("Authorization", buildAuthHeader(deviceInfo, accessToken))
-        val staticUrl = "$baseUrl/Videos/${item.id}/stream?static=True"
+
+        val mediaSources = item.mediaSources
+        if (!mediaSources.isNullOrEmpty()) {
+            return mediaSources.mapIndexed { index, ms ->
+                val msId = ms.id ?: item.id
+                val container = ms.container?.takeIf { it.isNotBlank() } ?: "mkv"
+                val streamUrl = "$baseUrl/Videos/${item.id}/stream.$container?static=true&MediaSourceId=$msId&api_key=$accessToken"
+                val vStream = ms.mediaStreams?.firstOrNull { it.type.equals("Video", ignoreCase = true) }
+                val height = vStream?.height
+                val title = ms.name?.takeIf { it.isNotBlank() }
+                    ?: (height?.let { "${it}p ($container)" } ?: "Source ${index + 1} (${container.uppercase()})")
+
+                val subtitleTracks = ms.mediaStreams?.filter {
+                    it.type.equals("Subtitle", ignoreCase = true) && (it.isExternal == true || !it.deliveryUrl.isNullOrBlank())
+                }?.mapNotNull { sub ->
+                    val subIndex = sub.index ?: return@mapNotNull null
+                    val subUrl = when {
+                        !sub.deliveryUrl.isNullOrBlank() -> {
+                            val raw = if (sub.deliveryUrl.startsWith("http")) sub.deliveryUrl else "$baseUrl${sub.deliveryUrl}"
+                            if (!raw.contains("api_key=")) "$raw${if (raw.contains("?")) "&" else "?"}api_key=$accessToken" else raw
+                        }
+
+                        else -> "$baseUrl/Videos/${item.id}/$msId/Subtitles/$subIndex/Stream.vtt?api_key=$accessToken"
+                    }
+                    val lang = sub.displayTitle?.takeIf { it.isNotBlank() }
+                        ?: sub.title?.takeIf { it.isNotBlank() }
+                        ?: sub.language?.takeIf { it.isNotBlank() }
+                        ?: "Subtitle ${subIndex + 1}"
+                    Track(url = subUrl, lang = lang)
+                } ?: emptyList()
+
+                Video(
+                    videoUrl = streamUrl,
+                    videoTitle = title,
+                    headers = videoHeaders,
+                    resolution = height,
+                    bitrate = vStream?.bitRate,
+                    subtitleTracks = subtitleTracks,
+                )
+            }
+        }
+
+        val staticUrl = "$baseUrl/Videos/${item.id}/stream?static=true&MediaSourceId=${item.id}&api_key=$accessToken"
         return listOf(Video(videoUrl = staticUrl, videoTitle = "Source", headers = videoHeaders))
     }
 

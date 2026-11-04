@@ -1,19 +1,12 @@
 ext {
     extName = 'AnimePahe'
     extClass = '.AnimePahe'
-    // Requires extensions-lib v17: the Hoster -> Video hand-off now uses `memo`
-    // (Hoster.internalData / Video.internalData are @Deprecated(ERROR) in v17).
-    // Advertising 17 also requires the patched repo Inspector — see
-    // scripts/patch_inspector.py and verify with `python3 scripts/cli.py v17-compat`.
-    libVersion = 17
-    extVersionCode = 83
+    libVersion = 16
+    extVersionCode = 87
 }
 
 apply from: "$rootDir/common.gradle"
 
 dependencies {
-    implementation(project(":lib:playlist-utils"))
-    implementation(project(":lib:vidhide-extractor"))
-    implementation(project(":lib:voe-extractor"))
     implementation(project(":lib:unpacker"))
 }

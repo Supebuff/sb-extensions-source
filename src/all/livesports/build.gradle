@@ -1,8 +1,0 @@
-ext {
-    extName = 'Live Sports'
-    extClass = '.LiveSports'
-    extVersionCode = 2
-    isNsfw = false
-}
-
-apply from: "$rootDir/common.gradle"

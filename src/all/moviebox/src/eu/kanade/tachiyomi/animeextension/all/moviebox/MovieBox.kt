@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.net.Uri
 import android.util.Base64
 import androidx.preference.ListPreference
+import androidx.preference.MultiSelectListPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.animeextension.all.moviebox.extractors.M3u8Integration
@@ -19,10 +20,14 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.lib.episodemetadatafetcher.EpisodeMetadataFetcher
 import extensions.utils.Source
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -81,14 +86,11 @@ class MovieBox : Source() {
         }
     }
 
-    private val cinemetaCache = ConcurrentHashMap<String, CinemetaResult>()
-
-    private val metaClient by lazy {
-        client.newBuilder()
-            .connectTimeout(5000, TimeUnit.MILLISECONDS)
-            .readTimeout(5000, TimeUnit.MILLISECONDS)
-            .build()
+    private val metadataFetcher by lazy {
+        EpisodeMetadataFetcher(client, json)
     }
+
+    private val videoListCache = ConcurrentHashMap<String, Pair<Long, List<Video>>>()
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> = withContext(Dispatchers.IO) {
         val episodeUrl = episode.url
@@ -98,19 +100,73 @@ class MovieBox : Source() {
         val se = parts[0]
         val ep = parts[1]
         val idsString = parts[2]
-        val subjectIds = idsString.split("~~").mapNotNull {
-            val p = it.split(":", limit = 2)
-            if (p.size == 2) Pair(p[0], p[1]) else null
+        val mainDetailPath = parts[3]
+
+        val cacheKey = "$se|$ep|$mainDetailPath"
+        val cached = videoListCache[cacheKey]
+        if (cached != null && System.currentTimeMillis() - cached.first < 15 * 60 * 1000L && cached.second.isNotEmpty()) {
+            return@withContext cached.second
         }
 
-        val videos = subjectIds.map { (sid, lang) ->
+        val subjectIds = idsString.split("~~").mapNotNull {
+            val p = it.split(":", limit = 2)
+            if (p.size == 2) {
+                val sid = p[0]
+                val langAndDp = p[1]
+                val lang = langAndDp.substringBefore("^")
+                val dp = if (langAndDp.contains("^")) langAndDp.substringAfter("^") else mainDetailPath
+                Triple(sid, lang, dp)
+            } else null
+        }
+
+        val excluded = preferences.getStringSet(PREF_AUDIO_EXCLUDE_KEY, emptySet()) ?: emptySet()
+        val activeSubjects = subjectIds.filterNot { sub ->
+            val langTag = sub.second.replace("dub", "").replace("dubbed", "").trim()
+            excluded.contains(sub.second) || excluded.contains(langTag)
+        }.ifEmpty { subjectIds }
+
+        val videos = activeSubjects.map { (sid, lang, dp) ->
             async {
-                fetchVideosForSubject(sid, lang, se, ep)
+                fetchVideosForSubject(sid, lang, se, ep, dp)
             }
         }.awaitAll().flatten()
 
         val sorted = videos.sortVideos()
-        m3u8Integration.processVideoList(sorted)
+        val processed = m3u8Integration.processVideoList(sorted)
+        if (processed.isNotEmpty()) {
+            videoListCache[cacheKey] = Pair(System.currentTimeMillis(), processed)
+            val nextEpNum = ep.toIntOrNull()?.plus(1)
+            if (nextEpNum != null && se.toIntOrNull() != null) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    prefetchEpisodeVideos(activeSubjects, se, nextEpNum.toString(), mainDetailPath)
+                }
+            }
+        }
+        processed
+    }
+
+    private suspend fun prefetchEpisodeVideos(
+        subjects: List<Triple<String, String, String>>,
+        se: String,
+        nextEp: String,
+        mainDetailPath: String,
+    ) {
+        val nextCacheKey = "$se|$nextEp|$mainDetailPath"
+        if (videoListCache.containsKey(nextCacheKey)) return
+        try {
+            val nextVideos = coroutineScope {
+                subjects.map { (sid, lang, dp) ->
+                    async { fetchVideosForSubject(sid, lang, se, nextEp, dp) }
+                }.awaitAll().flatten()
+            }
+            val sorted = nextVideos.sortVideos()
+            val processed = m3u8Integration.processVideoList(sorted)
+            if (processed.isNotEmpty()) {
+                videoListCache[nextCacheKey] = Pair(System.currentTimeMillis(), processed)
+            }
+        } catch (_: Exception) {
+            // Background prefetch failure ignored
+        }
     }
 
     private val apiHosts = listOf(
@@ -127,20 +183,20 @@ class MovieBox : Source() {
         "https://h5-api.aoneroom.com",
     )
 
-    private val secretKeyDefault = "NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw=="
+    private val signingKeyDefault = "NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw=="
 
     // Alternate request-signing key (observed in the official app and used as a
     // retry leg by CNC's CloudStream MovieBoxProvider): when the primary key
     // stops producing accepted signatures (server-side rotation), the same
     // canonical string is re-signed with this key and the request retried once.
-    private val secretKeyAlt = "WHFuMm5uTzQxL0w5Mm8xaXVYaFNMSFRiWHZZNFo1Wlo2Mm04bVNMQQ=="
+    private val signingKeyAlt = "WHFuMm5uTzQxL0w5Mm8xaXVYaFNMSFRiWHZZNFo1Wlo2Mm04bVNMQQ=="
 
     // The stream/resource CDNs (sacdn/macdn/bcdn.hakunaymatata.com, *.aoneroom.com)
     // reject desktop browser UAs with HTTP 428 Forbidden; only the Android app's
     // Cronet UA is served. Video and API requests must both carry this UA
     // (verified live 2026-09).
     private val MOVIEBOX_APP_UA =
-        "com.community.mbox.in/50020126 (Linux; U; Android 14; en_IN; SM-S918B; Build/UP1A.231005.007; Cronet/133.0.6876.3)"
+        "com.community.mbox.in/50020130 (Linux; U; Android 14; en_IN; SM-S918B; Build/UD1A.230803.041; Cronet/145.0.7582.0)"
 
     private fun saveToken(token: String?) {
         if (!token.isNullOrBlank() && isTokenValid(token)) {
@@ -219,20 +275,20 @@ class MovieBox : Source() {
     private fun getClientInfo(): String = JsonObject(
         mapOf(
             "package_name" to kotlinx.serialization.json.JsonPrimitive("com.community.mbox.in"),
-            "version_name" to kotlinx.serialization.json.JsonPrimitive("4.0.02.0831.03"),
-            "version_code" to kotlinx.serialization.json.JsonPrimitive(50020126),
+            "version_name" to kotlinx.serialization.json.JsonPrimitive("4.0.03.0920.03"),
+            "version_code" to kotlinx.serialization.json.JsonPrimitive(50020130),
             "os" to kotlinx.serialization.json.JsonPrimitive("android"),
             "os_version" to kotlinx.serialization.json.JsonPrimitive("14"),
             "device_id" to kotlinx.serialization.json.JsonPrimitive(deviceId),
-            "install_store" to kotlinx.serialization.json.JsonPrimitive("ps"),
-            "gaid" to kotlinx.serialization.json.JsonPrimitive("d7578036d13336cc"),
+            "install_store" to kotlinx.serialization.json.JsonPrimitive("official"),
+            "gaid" to kotlinx.serialization.json.JsonPrimitive("1b2212c1-dadf-43c3-a0c8-bd6ce48ae22d"),
             "brand" to kotlinx.serialization.json.JsonPrimitive("samsung"),
             "model" to kotlinx.serialization.json.JsonPrimitive("SM-S918B"),
             "system_language" to kotlinx.serialization.json.JsonPrimitive("en"),
             "net" to kotlinx.serialization.json.JsonPrimitive("NETWORK_WIFI"),
             "region" to kotlinx.serialization.json.JsonPrimitive("IN"),
             "timezone" to kotlinx.serialization.json.JsonPrimitive("Asia/Calcutta"),
-            "sp_code" to kotlinx.serialization.json.JsonPrimitive("90101"),
+            "sp_code" to kotlinx.serialization.json.JsonPrimitive(""),
         ),
     ).toString()
 
@@ -302,7 +358,7 @@ class MovieBox : Source() {
     ): String {
         val canonical = buildCanonicalString(method, accept, contentType, url, body, timestamp)
 
-        val secretStr = String(Base64.decode(if (useAltKey) secretKeyAlt else secretKeyDefault, Base64.DEFAULT))
+        val secretStr = String(Base64.decode(if (useAltKey) signingKeyAlt else signingKeyDefault, Base64.DEFAULT))
         val secretBytes = Base64.decode(secretStr, Base64.DEFAULT)
 
         val mac = Mac.getInstance("HmacMD5")
@@ -577,19 +633,91 @@ class MovieBox : Source() {
 
         val data = jsonRes?.obj?.get("data")?.obj ?: throw Exception("Details not found")
         val subject = data["subject"]?.obj ?: data
+        val sid = subject["subjectId"]?.str ?: data["subjectId"]?.str ?: id
+        val dp = subject["detailPath"]?.str
+            ?: subject["detailUrl"]?.str?.substringAfterLast("/")?.substringBefore("?")
+            ?: data["detailPath"]?.str
+            ?: data["detailUrl"]?.str?.substringAfterLast("/")?.substringBefore("?")
+            ?: ""
 
         return SAnime.create().apply {
             title = subject["title"]?.str ?: ""
             description = subject["description"]?.str
             genre = subject["genre"]?.str
             author = subject["countryName"]?.str
-            url = subject["subjectId"]?.str?.let { "/movies/$it" } ?: url
+            url = if (dp.isNotBlank()) "/movies/$sid|$dp" else "/movies/$sid"
             status = SAnime.UNKNOWN
             initialized = true
         }
     }
 
     override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
+
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val episodes = super.getEpisodeList(anime)
+        val showThumbnails = preferences.getBoolean(PREF_THUMBNAILS_KEY, PREF_THUMBNAILS_DEFAULT)
+        val showTitle = anime.title
+
+        if (showTitle.isBlank() || episodes.isEmpty()) return episodes
+
+        // 1. Single movie enrichment
+        if (episodes.size == 1 && episodes[0].name.startsWith("Play Movie")) {
+            val movieMeta = try {
+                metadataFetcher.fetchMovieMetadata(showTitle)
+            } catch (_: Exception) {
+                null
+            }
+            if (movieMeta != null) {
+                val ep = episodes[0]
+                if (!movieMeta.description.isNullOrBlank()) {
+                    ep.summary = movieMeta.description
+                }
+                if (showThumbnails && !movieMeta.thumbnailUrl.isNullOrBlank()) {
+                    ep.preview_url = movieMeta.thumbnailUrl
+                }
+            }
+            return episodes
+        }
+
+        // 2. TV Series enrichment
+        val seasons = episodes.mapNotNull {
+            val se = it.url.substringBefore("|").toIntOrNull()
+            if (se != null && se > 0) se else null
+        }.distinct()
+
+        val metaMap = mutableMapOf<Pair<Int, Int>, EpisodeMetadataFetcher.EpisodeMetadata>()
+        for (seNum in seasons) {
+            try {
+                val sMeta = metadataFetcher.fetchMedia(showTitle, season = seNum, isTv = true)
+                sMeta.forEach { (epNum, meta) ->
+                    metaMap[Pair(seNum, epNum)] = meta
+                }
+            } catch (_: Exception) {}
+        }
+
+        episodes.forEach { ep ->
+            val parts = ep.url.split("|")
+            val seNum = parts.getOrNull(0)?.toIntOrNull() ?: 1
+            val epNum = parts.getOrNull(1)?.toIntOrNull() ?: ep.episode_number.toInt()
+            val metaEp = metaMap[Pair(seNum, epNum)] ?: return@forEach
+
+            if (!metaEp.title.isNullOrBlank()) {
+                ep.name = "Season $seNum - Episode $epNum - ${metaEp.title}"
+            }
+            if (!metaEp.description.isNullOrBlank()) {
+                ep.summary = metaEp.description
+            }
+            if (showThumbnails && !metaEp.thumbnailUrl.isNullOrBlank()) {
+                ep.preview_url = metaEp.thumbnailUrl
+            }
+            val date = parseDate(metaEp.airdate)
+            if (date > 0L) {
+                ep.date_upload = date
+            }
+        }
+
+        return episodes
+    }
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val xUser = response.header("x-user")
@@ -608,17 +736,27 @@ class MovieBox : Source() {
         }
 
         val data = jsonRes?.obj?.get("data")?.obj ?: return emptyList()
-        val mainSubjectId = data["subject"]?.obj?.get("subjectId")?.str
+        val subjectObj = data["subject"]?.obj ?: data
+        val mainSubjectId = subjectObj["subjectId"]?.str
             ?: data["subjectId"]?.str ?: return emptyList()
-        val detailPath = data["subject"]?.obj?.get("detailPath")?.str ?: mainSubjectId
+        val fallbackDp = if (urlParts.size > 1 && urlParts[1].isNotBlank() && !urlParts[1].all { it.isDigit() }) urlParts[1] else ""
+        val detailPath = subjectObj["detailPath"]?.str
+            ?: subjectObj["detailUrl"]?.str?.substringAfterLast("/")?.substringBefore("?")
+            ?: data["detailPath"]?.str
+            ?: data["detailUrl"]?.str?.substringAfterLast("/")?.substringBefore("?")
+            ?: fallbackDp
 
         val allIds = mutableListOf<Pair<String, String>>()
-        allIds.add(Pair(mainSubjectId, data["subject"]?.obj?.get("lanName")?.str ?: "Original"))
-        val dubsArray = data["subject"]?.obj?.get("dubs")?.arr ?: data["dubs"]?.arr
+        allIds.add(Pair(mainSubjectId, subjectObj["lanName"]?.str ?: "Original"))
+        val dubsArray = subjectObj["dubs"]?.arr ?: data["dubs"]?.arr
         dubsArray?.forEach {
             val sid = it.obj?.get("subjectId")?.str
             val lang = it.obj?.get("lanName")?.str ?: "Unknown"
-            if (sid != null && allIds.none { p -> p.first == sid }) allIds.add(Pair(sid, lang))
+            val dubDp = it.obj?.get("detailPath")?.str
+                ?: it.obj?.get("detailUrl")?.str?.substringAfterLast("/")?.substringBefore("?")
+                ?: ""
+            val storedLang = if (dubDp.isNotBlank()) "$lang^$dubDp" else lang
+            if (sid != null && allIds.none { p -> p.first == sid }) allIds.add(Pair(sid, storedLang))
         }
 
         val episodes = mutableListOf<SEpisode>()
@@ -664,38 +802,15 @@ class MovieBox : Source() {
             ?: data["subject"]?.obj?.get("stills")?.arr?.firstOrNull()?.obj?.get("url")?.str
 
         val showThumbnails = preferences.getBoolean(PREF_THUMBNAILS_KEY, PREF_THUMBNAILS_DEFAULT)
-        val showTitle = data["subject"]?.obj?.get("title")?.str ?: data["title"]?.str ?: ""
-        val isTv = seasonsMap.isNotEmpty()
-        val cinemetaResult = if (showTitle.isNotBlank()) {
-            fetchCinemetaMeta(showTitle, isTv)
-        } else {
-            CinemetaResult()
-        }
-        val metaEps = cinemetaResult.episodes
-        val movieThumbnail = cinemetaResult.background ?: cinemetaResult.poster ?: defaultThumbnail
-        val movieSummary = cinemetaResult.description ?: defaultSummary
-
         val idsString = allIds.joinToString("~~") { "${it.first}:${it.second}" }
         seasonsMap.forEach { (seNum, epSet) ->
             epSet.sorted().forEach { epNum ->
-                val metaEp = metaEps.firstOrNull { it.season == seNum && it.episode == epNum }
                 episodes.add(
                     SEpisode.create().apply {
-                        name = metaEp?.name?.let { "Season $seNum - Episode $epNum - $it" } ?: "Season $seNum - Episode $epNum"
+                        name = "Season $seNum - Episode $epNum"
                         episode_number = epNum.toFloat()
                         url = "$seNum|$epNum|$idsString|$detailPath"
-                        val date = parseDate(metaEp?.released)
-                        date_upload = if (date > 0L) date else System.currentTimeMillis()
-                        val epSummary = metaEp?.overview?.takeIf { it.isNotBlank() } ?: defaultSummary
-                        if (!epSummary.isNullOrBlank()) {
-                            summary = epSummary
-                        }
-                        if (showThumbnails) {
-                            val epThumb = metaEp?.thumbnail?.takeIf { it.isNotBlank() } ?: defaultThumbnail
-                            if (!epThumb.isNullOrBlank()) {
-                                preview_url = epThumb
-                            }
-                        }
+                        date_upload = System.currentTimeMillis()
                     },
                 )
             }
@@ -710,11 +825,11 @@ class MovieBox : Source() {
                     episode_number = 1f
                     url = "0|0|$idsString|$detailPath"
                     date_upload = System.currentTimeMillis()
-                    if (!movieSummary.isNullOrBlank()) {
-                        summary = movieSummary
+                    if (!defaultSummary.isNullOrBlank()) {
+                        summary = defaultSummary
                     }
-                    if (showThumbnails && !movieThumbnail.isNullOrBlank()) {
-                        preview_url = movieThumbnail
+                    if (showThumbnails && !defaultThumbnail.isNullOrBlank()) {
+                        preview_url = defaultThumbnail
                     }
                 },
             )
@@ -744,156 +859,147 @@ class MovieBox : Source() {
         }
     }
 
-    private fun fetchCinemetaMeta(title: String, isTv: Boolean): CinemetaResult {
-        val cleanTitle = title.substringBefore("(").substringBefore("[").trim()
-        if (cleanTitle.isBlank()) return CinemetaResult()
-        val cacheKey = "$cleanTitle|$isTv"
-        cinemetaCache[cacheKey]?.let { return it }
+    override fun videoListRequest(episode: SEpisode): Request = throw UnsupportedOperationException("Not used")
 
-        val metaType = if (isTv) "series" else "movie"
-        val endpoints = listOf("imdb-search", "top")
-        var metas: List<JsonElement>? = null
-        for (ep in endpoints) {
-            val searchUrl = "https://v3-cinemeta.strem.io/catalog/$metaType/$ep/search=${Uri.encode(cleanTitle)}.json"
+    override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException("Not used")
+
+    private suspend fun fetchVideosForSubject(sid: String, lang: String, se: String, ep: String, detailPath: String = ""): List<Video> {
+        val enableDash = preferences.getBoolean(PREF_ENABLE_DASH_KEY, PREF_ENABLE_DASH_DEFAULT)
+        val videos = mutableListOf<Video>()
+        var activeDetailPath = detailPath.trim()
+
+        if (activeDetailPath.isBlank()) {
+            val detailsJson = safeGetJsonWithHeaders("/wefeed-mobile-bff/subject-api/get?subjectId=$sid", isDetails = true)?.first
+            val sObj = detailsJson?.obj?.get("data")?.obj?.let { it["subject"]?.obj ?: it }
+            activeDetailPath = sObj?.get("detailPath")?.str
+                ?: sObj?.get("detailUrl")?.str?.substringAfterLast("/")?.substringBefore("?")
+                ?: ""
+        }
+
+        // 1. Try web/H5 play endpoint (matches CNCVerse MovieBoxProviderIN)
+        if (activeDetailPath.isNotBlank()) {
+            val subDomain = "https://movie-box.co"
+            val mbUrl = "$subDomain/wefeed-h5api-bff/subject/play?subjectId=$sid&se=$se&ep=$ep&detailPath=$activeDetailPath&streamSignType=1&supportCodecs%5Bhevc%5D=1&supportCodecs%5Bh264%5D=1"
+            val token = getCachedToken()
+            val mbHeaders = Headers.Builder()
+                .add("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36")
+                .add("Origin", subDomain)
+                .add("Referer", "$subDomain/movies/$activeDetailPath?id=$sid&type=/movie/detail&detailSe=&detailEp=&lang=en")
+                .add("Accept", "application/json")
+                .add("x-client-info", """{"timezone":"Asia/Calcutta"}""")
+                .add("x-request-lang", "en")
+                .add("x-vip-restrict", "0")
+                .add("x-no-high-risk-restrict", "0")
+                .add("x-source", "")
+                .apply {
+                    if (token.isNotBlank()) add("Authorization", "Bearer $token")
+                }
+                .build()
+
             try {
-                metaClient.newCall(GET(searchUrl)).execute().use { response ->
-                    if (response.isSuccessful) {
-                        val body = response.body.string()
-                        val jsonRes = json.parseToJsonElement(body).obj
-                        val list = jsonRes?.get("metas")?.arr
-                        if (!list.isNullOrEmpty()) {
-                            metas = list
+                val req = GET(mbUrl, mbHeaders)
+                client.newCall(req).execute().use { resp ->
+                    val respBody = resp.body.string()
+                    if (resp.isSuccessful && respBody.trim().startsWith("{")) {
+                        val root = json.parseToJsonElement(respBody).obj
+                        val dataObj = root?.get("data")?.obj
+                        val streams = dataObj?.get("streams")?.arr
+                        val dash = dataObj?.get("dash")?.arr
+
+                        // MP4 progressive streams
+                        streams?.forEach { streamEl ->
+                            val s = streamEl.obj ?: return@forEach
+                            val streamUrl = s["url"]?.str ?: return@forEach
+                            if (streamUrl.isBlank() || streamUrl.startsWith("magnet:")) return@forEach
+                            val res = s["resolutions"]?.str ?: "Auto"
+                            val streamId = s["id"]?.str ?: ""
+                            val headers = Headers.Builder()
+                                .add("Referer", "https://movie-box.co/")
+                                .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
+                                .build()
+
+                            val subTracks = mutableListOf<Track>()
+                            if (streamId.isNotBlank()) {
+                                subTracks.addAll(fetchExternalCaptions(sid, streamId, se, ep, s["resourceId"]?.str))
+                            }
+                            val distinctSubs = subTracks.distinctBy { it.url }
+
+                            val langTag = lang.replace("dub", "").replace("dubbed", "").trim()
+                            val langSuffix = if (langTag.isNotBlank() && !langTag.equals("original", ignoreCase = true)) " - $langTag" else ""
+                            res.split(",").forEach { r ->
+                                val cleanRes = r.trim()
+                                val resInt = cleanRes.toIntOrNull()
+                                videos.add(
+                                    Video(
+                                        videoUrl = streamUrl,
+                                        videoTitle = "$cleanRes (MP4$langSuffix)",
+                                        headers = headers,
+                                        resolution = resInt,
+                                        subtitleTracks = distinctSubs,
+                                    ),
+                                )
+                            }
+                        }
+
+                        // DASH streams
+                        if (enableDash) {
+                            dash?.forEach { dashEl ->
+                                val d = dashEl.obj ?: return@forEach
+                                val dashUrl = d["url"]?.str ?: return@forEach
+                                if (dashUrl.isBlank()) return@forEach
+                                val res = d["resolutions"]?.str ?: "Auto"
+                                val signCookie = d["signCookie"]?.str?.trim()?.trimEnd(';')
+                                val signHeaderKey = d["signHeaderKey"]?.str?.ifBlank { "X-MB-Token" } ?: "X-MB-Token"
+                                val streamId = d["id"]?.str ?: ""
+
+                                val headers = Headers.Builder()
+                                    .add("Origin", subDomain)
+                                    .add("Referer", "$subDomain/movies/$activeDetailPath?id=$sid&type=/movie/detail&detailSe=&detailEp=&lang=en")
+                                    .add("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36")
+                                    .apply {
+                                        if (!signCookie.isNullOrBlank()) {
+                                            add(signHeaderKey, signCookie)
+                                            add("Cookie", signCookie)
+                                        }
+                                    }
+                                    .build()
+
+                                val subTracks = mutableListOf<Track>()
+                                if (streamId.isNotBlank()) {
+                                    subTracks.addAll(fetchExternalCaptions(sid, streamId, se, ep, d["resourceId"]?.str))
+                                }
+                                val distinctSubs = subTracks.distinctBy { it.url }
+
+                                val langTag = lang.replace("dub", "").replace("dubbed", "").trim()
+                                val langSuffix = if (langTag.isNotBlank() && !langTag.equals("original", ignoreCase = true)) " - $langTag" else ""
+                                res.split(",").forEach { r ->
+                                    val cleanRes = r.trim()
+                                    val resInt = cleanRes.toIntOrNull()
+                                    videos.add(
+                                        Video(
+                                            videoUrl = dashUrl,
+                                            videoTitle = "$cleanRes (DASH$langSuffix)",
+                                            headers = headers,
+                                            resolution = resInt,
+                                            subtitleTracks = distinctSubs,
+                                        ),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             } catch (_: Exception) {
-                // ignore and try next endpoint
-            }
-            if (!metas.isNullOrEmpty()) break
-        }
-
-        if (metas.isNullOrEmpty() && (cleanTitle.contains(":") || cleanTitle.contains("-"))) {
-            val baseTitle = cleanTitle.substringBefore(":").substringBefore("-").trim()
-            if (baseTitle.isNotBlank() && !baseTitle.equals(cleanTitle, ignoreCase = true)) {
-                for (ep in endpoints) {
-                    val searchUrl = "https://v3-cinemeta.strem.io/catalog/$metaType/$ep/search=${Uri.encode(baseTitle)}.json"
-                    try {
-                        metaClient.newCall(GET(searchUrl)).execute().use { response ->
-                            if (response.isSuccessful) {
-                                val body = response.body.string()
-                                val jsonRes = json.parseToJsonElement(body).obj
-                                val list = jsonRes?.get("metas")?.arr
-                                if (!list.isNullOrEmpty()) {
-                                    metas = list
-                                }
-                            }
-                        }
-                    } catch (_: Exception) {
-                        // ignore
-                    }
-                    if (!metas.isNullOrEmpty()) break
-                }
+                // Ignore and fall back to play-info below
             }
         }
 
-        if (!metas.isNullOrEmpty()) {
-            var bestImdbId: String? = null
-            for (metaEl in metas!!) {
-                val m = metaEl.obj ?: continue
-                val name = m["name"]?.str ?: continue
-                if (name.equals(cleanTitle, ignoreCase = true) || name.contains(cleanTitle, ignoreCase = true) || cleanTitle.contains(name, ignoreCase = true)) {
-                    bestImdbId = m["imdb_id"]?.str ?: m["id"]?.str
-                    if (bestImdbId != null) break
-                }
-            }
-            if (bestImdbId == null) {
-                bestImdbId = metas!!.firstOrNull()?.obj?.let { it["imdb_id"]?.str ?: it["id"]?.str }
-            }
+        if (videos.isNotEmpty()) return videos
 
-            if (bestImdbId != null) {
-                val detailsUrl = "https://v3-cinemeta.strem.io/meta/$metaType/$bestImdbId.json"
-                try {
-                    metaClient.newCall(GET(detailsUrl)).execute().use { detailsResponse ->
-                        if (detailsResponse.isSuccessful) {
-                            val detailsBody = detailsResponse.body.string()
-                            val detailsJson = json.parseToJsonElement(detailsBody).obj
-                            val metaObj = detailsJson?.get("meta")?.obj
-                            if (metaObj != null) {
-                                val description = metaObj["description"]?.str ?: metaObj["overview"]?.str
-                                val poster = metaObj["poster"]?.str
-                                val background = metaObj["background"]?.str
-
-                                val episodesList = mutableListOf<CinemetaEpisode>()
-                                val videos = metaObj["videos"]?.arr
-                                videos?.forEach { videoEl ->
-                                    val v = videoEl.obj ?: return@forEach
-                                    val name = v["name"]?.str
-                                    val season = v["season"]?.jsonPrimitive?.intOrNull ?: 1
-                                    val episode = v["number"]?.jsonPrimitive?.intOrNull ?: v["episode"]?.jsonPrimitive?.intOrNull ?: 1
-                                    val overview = v["overview"]?.str ?: v["description"]?.str
-                                    val thumbnail = v["thumbnail"]?.str
-                                    val released = v["released"]?.str ?: v["firstAired"]?.str
-                                    episodesList.add(CinemetaEpisode(season, episode, name, overview, thumbnail, released))
-                                }
-                                val result = CinemetaResult(description, poster, background, episodesList)
-                                cinemetaCache[cacheKey] = result
-                                return result
-                            }
-                        }
-                    }
-                } catch (_: Exception) {
-                    // ignore
-                }
-            }
-        }
-
-        val emptyResult = CinemetaResult()
-        cinemetaCache[cacheKey] = emptyResult
-        return emptyResult
-    }
-
-    private data class CinemetaResult(
-        val description: String? = null,
-        val poster: String? = null,
-        val background: String? = null,
-        val episodes: List<CinemetaEpisode> = emptyList(),
-    )
-
-    private data class CinemetaEpisode(
-        val season: Int,
-        val episode: Int,
-        val name: String?,
-        val overview: String?,
-        val thumbnail: String?,
-        val released: String?,
-    )
-
-    override fun videoListRequest(episode: SEpisode): Request = GET(baseUrl, headersBuilder().add("X-Tachiyomi-Episode-Url", episode.url).build())
-
-    override fun videoListParse(response: Response): List<Video> {
-        val episodeUrl = response.request.header("X-Tachiyomi-Episode-Url") ?: return emptyList()
-        val parts = episodeUrl.split("|")
-        if (parts.size < 4) return emptyList()
-
-        val se = parts[0]
-        val ep = parts[1]
-        val idsString = parts[2]
-        val subjectIds = idsString.split("~~").mapNotNull {
-            val p = it.split(":", limit = 2)
-            if (p.size == 2) Pair(p[0], p[1]) else null
-        }
-
-        return subjectIds.flatMap { (sid, lang) ->
-            fetchVideosForSubject(sid, lang, se, ep)
-        }.sortVideos()
-    }
-
-    private fun fetchVideosForSubject(sid: String, lang: String, se: String, ep: String): List<Video> {
+        // 2. Fallback to mobile play-info endpoint
         val playUrl = "/wefeed-mobile-bff/subject-api/play-info?subjectId=$sid&se=$se&ep=$ep"
-        val jsonRes = safeGetJsonWithHeaders(playUrl, isPlayback = true)?.first ?: return emptyList()
-        val videos = mutableListOf<Video>()
-        val dataObj = jsonRes.obj?.get("data")?.obj
-        // Internal subtitles bundled with play-info (per docs: subTitleList).
+        val jsonRes = safeGetJsonWithHeaders(playUrl, isPlayback = true)?.first
+        val dataObj = jsonRes?.obj?.get("data")?.obj
         val internalSubs = parseCaptionTracks(dataObj)
         dataObj?.get("streams")?.arr?.forEach { stream ->
             val obj = stream.obj ?: return@forEach
@@ -910,8 +1016,6 @@ class MovieBox : Source() {
 
             val res = obj["resolutions"]?.str ?: "Auto"
             val streamId = obj["id"]?.str ?: ""
-            // Stream CDNs reject desktop UAs with HTTP 428 — video requests must
-            // carry the app's Cronet UA plus the full signed CloudFront cookie.
             val headers = Headers.Builder()
                 .add("User-Agent", MOVIEBOX_APP_UA)
                 .add("Referer", "https://moviebox.ph/")
@@ -928,6 +1032,7 @@ class MovieBox : Source() {
             val distinctSubs = subtitleTracks.distinctBy { it.url }
 
             val isDash = resolvedUrl.endsWith(".mpd") || resolvedUrl.contains("/dash/")
+            if (isDash && !enableDash) return@forEach
             val formatTag = if (isDash) "DASH" else "MP4"
             val langTag = lang.replace("dub", "").replace("dubbed", "").trim()
             val langSuffix = if (langTag.isNotBlank() && !langTag.equals("original", ignoreCase = true)) " - $langTag" else ""
@@ -945,10 +1050,8 @@ class MovieBox : Source() {
                 )
             }
         }
-        // play-info gave nothing usable (e.g. every stream sits on a dead
-        // CDN host): fall back to the details endpoint's resourceDetectors,
-        // which carries direct signed progressive MP4s per resolution
-        // (mostly movies; mirrors CNC's CloudStream MovieBoxProvider).
+
+        // 3. Fallback to resourceDetectors
         if (videos.isEmpty()) {
             videos.addAll(fetchDetectorFallbackVideos(sid, lang))
         }
@@ -956,6 +1059,7 @@ class MovieBox : Source() {
     }
 
     private fun fetchDetectorFallbackVideos(sid: String, lang: String): List<Video> {
+        val enableDash = preferences.getBoolean(PREF_ENABLE_DASH_KEY, PREF_ENABLE_DASH_DEFAULT)
         val jsonRes = safeGetJsonWithHeaders("/wefeed-mobile-bff/subject-api/get?subjectId=$sid", isDetails = true)
             ?: return emptyList()
         val dataObj = jsonRes.first.obj?.get("data")?.obj
@@ -979,9 +1083,11 @@ class MovieBox : Source() {
                 if (link.startsWith("magnet:")) return@forEach
                 if (link.contains("b164fbfb43477929") || link.contains("/other/2026/09/04/")) return@forEach
 
+                val isDash = link.contains("/dash/") || link.endsWith(".mpd")
+                if (isDash && !enableDash) return@forEach
                 val resLabel = obj["resolution"]?.str ?: "Auto"
                 val resInt = resLabel.filter { it.isDigit() }.toIntOrNull()
-                val formatTag = if (link.contains("/dash/") || link.endsWith(".mpd")) "DASH" else "MP4"
+                val formatTag = if (isDash) "DASH" else "MP4"
                 val subtitleTracks = (detectorSubs + parseCaptionTracks(obj)).distinctBy { it.url }
                 videos.add(
                     Video(
@@ -1022,7 +1128,7 @@ class MovieBox : Source() {
         return emptyList()
     }
 
-    private fun fetchExternalCaptions(sid: String, streamId: String, se: String, ep: String, resourceId: String?): List<Track> {
+    private suspend fun fetchExternalCaptions(sid: String, streamId: String, se: String, ep: String, resourceId: String?): List<Track> = coroutineScope {
         val paths = mutableListOf(
             "/wefeed-mobile-bff/subject-api/get-stream-captions?subjectId=$sid&streamId=$streamId",
         )
@@ -1031,19 +1137,14 @@ class MovieBox : Source() {
             paths.add("/wefeed-mobile-bff/subject-api/get-ext-captions?subjectId=$sid&resourceId=$resourceId&se=$se&ep=$ep")
         }
         paths.add("/wefeed-mobile-bff/subject-api/get-ext-captions?subjectId=$sid&streamId=$streamId&episode=$ep")
-        // Fire every caption path concurrently instead of serially — each API
-        // round-trip costs ~100-900ms and up to 4 of them were blocking the
-        // video list before playback could start.
-        val results = runBlocking {
-            paths.map { path ->
-                async(Dispatchers.IO) {
-                    runCatching {
-                        safeGetJsonWithHeaders(path, isPlayback = true)?.first?.obj?.get("data")?.obj
-                    }.getOrNull()?.let { parseCaptionTracks(it) } ?: emptyList()
-                }
-            }.awaitAll()
-        }
-        return results.firstOrNull { it.isNotEmpty() } ?: emptyList()
+        val results = paths.map { path ->
+            async(Dispatchers.IO) {
+                runCatching {
+                    safeGetJsonWithHeaders(path, isPlayback = true)?.first?.obj?.get("data")?.obj
+                }.getOrNull()?.let { parseCaptionTracks(it) } ?: emptyList()
+            }
+        }.awaitAll()
+        results.firstOrNull { it.isNotEmpty() } ?: emptyList()
     }
 
     private val blockedKeywords = listOf(
@@ -1069,9 +1170,12 @@ class MovieBox : Source() {
             val id = subject["subjectId"]?.str ?: subject["id"]?.str ?: return@mapNotNull null
             val rating = subject["imdbRatingValue"]?.str ?: ""
             val corner = subject["corner"]?.str ?: ""
+            val detailPath = subject["detailPath"]?.str
+                ?: subject["detailUrl"]?.str?.substringAfterLast("/")?.substringBefore("?")
+                ?: ""
             SAnime.create().apply {
                 title = subject["title"]?.str ?: ""
-                url = "/movies/$id"
+                url = if (detailPath.isNotBlank()) "/movies/$id|$detailPath" else "/movies/$id"
                 thumbnail_url = subject["cover"]?.obj?.get("url")?.str
                 status = if (rating.isNotBlank()) SAnime.COMPLETED else SAnime.UNKNOWN
                 author = if (corner.isNotBlank()) "[$corner] $rating" else rating
@@ -1113,7 +1217,8 @@ class MovieBox : Source() {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT) ?: PREF_QUALITY_DEFAULT
         val audio = preferences.getString(PREF_AUDIO_KEY, PREF_AUDIO_DEFAULT) ?: PREF_AUDIO_DEFAULT
         return this.sortedWith(
-            compareByDescending<Video> { it.videoTitle.contains(audio, ignoreCase = true) }
+            compareByDescending<Video> { it.videoTitle.contains("MP4", ignoreCase = true) }
+                .thenByDescending { it.videoTitle.contains(audio, ignoreCase = true) }
                 .thenByDescending { it.videoTitle.contains(quality, ignoreCase = true) },
         )
     }
@@ -1144,6 +1249,21 @@ class MovieBox : Source() {
             entryValues = PREF_AUDIO_VALUES
             setDefaultValue(PREF_AUDIO_DEFAULT)
             summary = "%s"
+        }.also { screen.addPreference(it) }
+
+        MultiSelectListPreference(screen.context).apply {
+            key = PREF_AUDIO_EXCLUDE_KEY
+            title = PREF_AUDIO_EXCLUDE_TITLE
+            entries = PREF_AUDIO_ENTRIES
+            entryValues = PREF_AUDIO_VALUES
+            setDefaultValue(emptySet<String>())
+        }.also { screen.addPreference(it) }
+
+        SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_ENABLE_DASH_KEY
+            title = PREF_ENABLE_DASH_TITLE
+            summary = PREF_ENABLE_DASH_SUMMARY
+            setDefaultValue(PREF_ENABLE_DASH_DEFAULT)
         }.also { screen.addPreference(it) }
 
         SwitchPreferenceCompat(screen.context).apply {
@@ -1317,6 +1437,14 @@ class MovieBox : Source() {
         private const val PREF_AUDIO_DEFAULT = "English"
         private val PREF_AUDIO_ENTRIES = arrayOf("English", "Original", "Original Audio", "Japanese", "Hindi", "Telugu", "Tamil", "Portuguese (Brazil)", "Tagalog")
         private val PREF_AUDIO_VALUES = arrayOf("English", "Original", "Original Audio", "Japanese", "Hindi", "Telugu", "Tamil", "ptbr", "Tagalog")
+
+        private const val PREF_AUDIO_EXCLUDE_KEY = "pref_audio_exclude"
+        private const val PREF_AUDIO_EXCLUDE_TITLE = "Excluded Audio Languages"
+
+        private const val PREF_ENABLE_DASH_KEY = "pref_enable_dash"
+        private const val PREF_ENABLE_DASH_TITLE = "Enable DASH streams"
+        private const val PREF_ENABLE_DASH_SUMMARY = "Include DASH (.mpd) streams alongside MP4. Disabled by default."
+        private const val PREF_ENABLE_DASH_DEFAULT = false
 
         private const val PREF_THUMBNAILS_KEY = "pref_show_thumbnails"
         private const val PREF_THUMBNAILS_TITLE = "Show episode thumbnails"

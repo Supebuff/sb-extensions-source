@@ -12,7 +12,6 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.lib.doodextractor.DoodExtractor
 import eu.kanade.tachiyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
@@ -42,11 +41,11 @@ class Anilight : Source() {
 
     private val m3u8Integration by lazy { M3u8Integration(client) }
 
-    private val doodExtractor by lazy { DoodExtractor(client) }
+    private val streamProxy by lazy { AniLightStreamProxy(network.client) }
 
-    private val megaPlayExtractor by lazy { MegaPlayExtractor(client, playlistUtils) }
+    private val megaPlayExtractor by lazy { MegaPlayExtractor(network.client, playlistUtils, streamProxy) }
 
-    private val streamProxy by lazy { AniLightStreamProxy(client) }
+    private val streamResolver by lazy { WebViewStreamResolver() }
 
     override val client: OkHttpClient by lazy {
         network.client.newBuilder()
@@ -241,56 +240,31 @@ class Anilight : Source() {
     // ============================ Hoster List =============================
 
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
-        val slug = episode.url.substringBefore("#")
+        val slug = episode.url.substringBefore("#").trim('/')
+        if (slug.isBlank()) return emptyList()
+
         val fragment = episode.url.substringAfter("#", "")
         val params = fragment.split("&").associate {
             val parts = it.split("=", limit = 2)
             parts[0] to (parts.getOrNull(1) ?: "")
         }
 
-        val animeId = params["id"]?.takeIf { it.isNotBlank() }
         val epNum = params["ep"]?.takeIf { it.isNotBlank() }
             ?: if (episode.episode_number % 1f == 0f) episode.episode_number.toInt().toString() else "${episode.episode_number}"
 
-        if (animeId == null) {
+        val response = try {
+            client.newCall(GET("$API_BASE/watch/$slug", headers)).execute()
+        } catch (_: Exception) {
             return emptyList()
         }
-
-        val response = client.newCall(GET("$API_BASE/watch/$slug", headers)).execute()
         val dto = response.parseAs<WatchResponseDto>(json)
-        val servers = dto.servers
-
-        val providerMap = linkedMapOf<String, MutableList<String>>()
-        val tipMap = mutableMapOf<String, String>()
-
-        servers?.subProviders?.forEach { p ->
-            p.id?.let { pid ->
-                val typeLabel = if (p.tip?.contains("Soft Sub", ignoreCase = true) == true) "soft-sub" else "sub"
-                providerMap.getOrPut(pid) { mutableListOf() }.add(typeLabel)
-                p.tip?.let { tip -> if (pid !in tipMap) tipMap[pid] = tip }
-            }
-        }
-
-        servers?.dubProviders?.forEach { p ->
-            p.id?.let { pid ->
-                providerMap.getOrPut(pid) { mutableListOf() }.add("dub")
-                p.tip?.let { tip -> if (pid !in tipMap) tipMap[pid] = tip }
-            }
-        }
-
-        // The API roster carries internal/experimental entries the website
-        // hides from its own server picker.
-        providerMap.keys
-            .filter { id -> HIDDEN_PROVIDER_IDS.any { id.contains(it, ignoreCase = true) } }
-            .forEach { hidden ->
-                providerMap.remove(hidden)
-                tipMap.remove(hidden)
-            }
+        val animeId = params["id"]?.takeIf { it.isNotBlank() } ?: dto.id?.toString().orEmpty()
+        val serversNew = fetchServersNew(slug)
 
         // The site's own default player: a MegaPlay embed that exists per
-        // episode (not per provider), so it is bolted onto the roster here
-        // exactly like the web player does.
-        val episodeDto = (dto.episodes ?: emptyList()).firstOrNull { it.episodeKey() == epNum }
+        // episode (not per provider), so it is placed at the top of the roster
+        // as the default entry.
+        val episodeDto = (dto.episodes ?: emptyList()).firstOrNull { it.matchesEp(epNum) }
         val embedSub = episodeDto?.embed_url?.sub.orEmpty()
         val embedDub = episodeDto?.embed_url?.dub.orEmpty()
         val embedTypes = buildList {
@@ -298,33 +272,44 @@ class Anilight : Source() {
             if (embedDub.isNotBlank()) add("dub")
         }
 
-        // The API occasionally ships an empty `servers` object; fall back to
-        // the full provider roster the site itself offers.
-        if (providerMap.isEmpty()) {
-            FALLBACK_PROVIDERS.forEach { (pid, tip) ->
-                providerMap[pid] = mutableListOf("sub", "dub")
-                tipMap[pid] = tip
-            }
-        }
+        // Since 2026-10 the API ships the provider roster per episode and per
+        // audio type through `serversNew`; the old `servers` object is gone.
+        val providerMap = linkedMapOf<String, MutableList<String>>()
 
         if (embedTypes.isNotEmpty()) {
             providerMap[MEG_PROVIDER] = embedTypes.toMutableList()
-            tipMap[MEG_PROVIDER] = "Embed"
         }
 
-        val prefServer = preferences.getString(PREF_SERVER_KEY, PREF_SERVER_DEFAULT) ?: PREF_SERVER_DEFAULT
+        (serversNew.episodeServers(epNum) ?: FALLBACK_SERVERS).fillProviders(providerMap)
+
+        // The API occasionally ships an empty roster; fall back to the full
+        // provider list the site itself offers.
+        if (providerMap.isEmpty()) {
+            FALLBACK_SERVERS.fillProviders(providerMap)
+        }
+
+        // The API roster can carry internal/experimental entries the website
+        // hides from its own server picker.
+        providerMap.keys
+            .filter { id -> HIDDEN_PROVIDER_IDS.any { id.contains(it, ignoreCase = true) } }
+            .forEach { hidden -> providerMap.remove(hidden) }
+
+        val prefServer = (preferences.getString(PREF_SERVER_KEY, PREF_SERVER_DEFAULT) ?: PREF_SERVER_DEFAULT)
+            .takeIf { it in PROVIDER_VALUES } ?: PREF_SERVER_DEFAULT
         val excludedServers = preferences.getStringSet(PREF_EXCLUDE_KEY, emptySet())?.toSet().orEmpty()
 
         return providerMap
             .filterKeys { it !in excludedServers }
             .map { (providerId, types) ->
-                val displayName = providerId.replaceFirstChar { it.uppercase() }
-                val tip = tipMap[providerId]
+                val displayName = if (providerId == MEG_PROVIDER) "AniLight" else providerId.replaceFirstChar { it.uppercase() }
+                val tip = if (providerId == MEG_PROVIDER) "Default · Sub, Dub" else typesLabel(types)
                 Hoster(
-                    hosterName = if (tip.isNullOrBlank()) displayName else "$displayName · $tip",
+                    hosterName = "$displayName · $tip",
                     // megaplay embeds are per-episode rather than per-provider, so
-                    // they ride along in two extra fields.
-                    hosterUrl = "$animeId|$epNum|$providerId|${types.distinct().joinToString(",")}|$embedSub|$embedDub",
+                    // they ride along in two extra fields; the slug rides along so
+                    // getVideoList can open the watch page when it has to mint a
+                    // Turnstile session.
+                    hosterUrl = "$animeId|$epNum|$providerId|${types.distinct().joinToString(",")}|$embedSub|$embedDub|$slug",
                 )
             }.sortedByDescending { it.providerId() == prefServer }
     }
@@ -335,18 +320,56 @@ class Anilight : Source() {
         if (it % 1f == 0f) it.toInt().toString() else it.toString()
     }
 
+    private fun EpisodeDto.matchesEp(target: String): Boolean {
+        val key = episodeKey()
+        if (key.equals(target, ignoreCase = true)) return true
+        val keyF = key.toFloatOrNull() ?: return false
+        val targetF = target.toFloatOrNull() ?: return false
+        return keyF == targetF
+    }
+
+    /** `serversNew` keys are episode numbers; match loosely ("1" == "1.0"). */
+    private fun Map<String, EpisodeServersNewDto>?.episodeServers(epNum: String): EpisodeServersNewDto? {
+        this ?: return null
+        get(epNum)?.let { return it }
+        val target = epNum.toFloatOrNull() ?: return null
+        return entries.firstOrNull { it.key.toFloatOrNull() == target }?.value
+    }
+
+    private fun EpisodeServersNewDto.fillProviders(into: MutableMap<String, MutableList<String>>) {
+        listOf(TYPE_SOFT_SUB to sub, TYPE_HARD_SUB to hardsub, "dub" to dub)
+            .forEach { (type, ids) ->
+                ids?.forEach { pid -> into.getOrPut(pid) { mutableListOf() }.add(type) }
+            }
+    }
+
+    private fun typesLabel(types: List<String>): String = types.distinct().joinToString(", ") {
+        when (it) {
+            TYPE_SOFT_SUB -> "Soft Sub"
+            TYPE_HARD_SUB -> "Hard Sub"
+            else -> "Dub"
+        }
+    }
+
     // ============================ Video Links =============================
+
+    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+        val hosters = getHosterList(episode)
+        return hosters.firstNotNullOfOrNull { hoster ->
+            getVideoList(hoster).ifEmpty { null }
+        } ?: emptyList()
+    }
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val parts = hoster.hosterUrl.split("|")
         if (parts.size < 4) return emptyList()
 
-        val animeId = parts[0]
         val epNum = parts[1]
         val providerId = parts[2]
         val types = parts[3].split(",").filter { it.isNotBlank() }
         val embedSub = parts.getOrNull(4).orEmpty()
         val embedDub = parts.getOrNull(5).orEmpty()
+        val slug = parts.getOrNull(6).orEmpty()
 
         // MegaPlay is a per-episode embed, not an API provider: it never sees
         // `/sources`, and it brings its own subtitle tracks.
@@ -357,142 +380,106 @@ class Anilight : Source() {
                 if (embedUrl.isBlank()) return@parallelCatchingFlatMap emptyList<Video>()
                 megaPlayExtractor.videosFromEmbed(embedUrl, isDub)
             }
-            return m3u8Integration.processVideoList(megaVideos.sortVideos())
+            return megaVideos.sortVideos()
         }
 
-        val videos = types.parallelCatchingFlatMap { rawType ->
-            val apiType = if (rawType.equals("dub", ignoreCase = true)) "dub" else "sub"
+        if (slug.isBlank()) return emptyList()
 
-            val sourcesDto = fetchSources(animeId, epNum, apiType, providerId)
-                ?: return@parallelCatchingFlatMap emptyList<Video>()
-
-            val subtitleTracks = (sourcesDto.tracks ?: emptyList())
-                .filterNot { it.kind.equals("thumbnails", ignoreCase = true) }
-                .mapNotNull { track ->
-                    val subUrl = track.url ?: return@mapNotNull null
-                    Track(
-                        url = proxyCaption(subUrl, providerId),
-                        lang = track.label ?: track.lang ?: "English",
-                    )
-                }
-
+        // Every non-embed provider sits behind the site's Turnstile session
+        // gate: `/sources` answers `403 {"error":"Missing Turnstile session
+        // token"}` unless the request replays a session only their widget can
+        // mint. Instead of replicating that handshake, the website's own player
+        // is used as the resolver — the watch page is opened with
+        // `?server=<provider>`, autoplays that server, and every media request
+        // it makes is captured (see [WebViewStreamResolver]).
+        val deadline = System.currentTimeMillis() + WEBVIEW_BUDGET_MS
+        val videos = types.flatMap { rawType ->
+            val isDub = rawType.equals("dub", ignoreCase = true)
             val audioBadge = when {
-                apiType == "dub" -> "[Dub]"
-                rawType.equals("soft-sub", ignoreCase = true) || subtitleTracks.isNotEmpty() -> "[Soft Sub]"
+                isDub -> "[Dub]"
+                rawType.equals(TYPE_SOFT_SUB, ignoreCase = true) -> "[Soft Sub]"
                 else -> "[Sub]"
             }
-
-            // Provider "vid" is an iframe-only DoodStream player that the site
-            // never proxies; it has to be unwrapped with the dood extractor.
-            if (providerId == VID_PROVIDER) {
-                return@parallelCatchingFlatMap (sourcesDto.sources ?: emptyList()).mapNotNull { src ->
-                    val embedUrl = src.url ?: return@mapNotNull null
-                    doodExtractor.videoFromUrl(
-                        url = embedUrl,
-                        prefix = audioBadge,
-                        externalSubs = subtitleTracks,
-                    )
-                }
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0) {
+                emptyList<Video>()
+            } else {
+                webPlayerVideos(
+                    slug = slug,
+                    epNum = epNum,
+                    providerId = providerId,
+                    lang = if (isDub) "dub" else "sub",
+                    audioBadge = audioBadge,
+                    timeoutMs = minOf(remaining, RESOLVE_TIMEOUT_MS),
+                )
             }
+        }
 
-            (sourcesDto.sources ?: emptyList()).flatMap { src ->
-                val rawUrl = src.url ?: return@flatMap emptyList()
-                // Providers round-robin their CDN hosts, and the one baked
-                // into the API response is not always the live one — walk the
-                // candidate list the website itself builds and keep the first
-                // that actually answers with media. A candidate blowing up
-                // must not take its siblings down with it.
-                try {
-                    proxyCandidates(rawUrl, providerId).firstNotNullOfOrNull { candidate ->
-                        videosFromCandidate(candidate, audioBadge, subtitleTracks, src.quality).ifEmpty { null }
-                    } ?: emptyList()
-                } catch (_: Exception) {
-                    emptyList()
-                }
+        // If the web player failed to resolve streams (e.g. Turnstile gate),
+        // seamlessly fall back to MegaPlay so playback never fails.
+        if (videos.isEmpty() && (embedSub.isNotBlank() || embedDub.isNotBlank())) {
+            val fallbackTypes = buildList {
+                if (embedSub.isNotBlank()) add("sub")
+                if (embedDub.isNotBlank()) add("dub")
+            }
+            val megaFallback = fallbackTypes.parallelCatchingFlatMap { rawType ->
+                val isDub = rawType.equals("dub", ignoreCase = true)
+                val embedUrl = if (isDub) embedDub else embedSub
+                if (embedUrl.isBlank()) return@parallelCatchingFlatMap emptyList<Video>()
+                megaPlayExtractor.videosFromEmbed(embedUrl, isDub)
+            }
+            if (megaFallback.isNotEmpty()) {
+                return megaFallback.sortVideos()
             }
         }
 
         return m3u8Integration.processVideoList(videos.sortVideos())
     }
 
-    private suspend fun fetchSources(animeId: String, epNum: String, apiType: String, providerId: String): SourcesResponseDto? {
-        val url = "$API_BASE/sources?id=${enc(animeId)}&epNum=${enc(epNum)}&type=${enc(apiType)}&providerId=${enc(providerId)}"
+    /**
+     * Resolves [providerId] through the site's own player.
+     *
+     * Each captured candidate goes through the same probe the API path used to
+     * feed, so a rotated worker host or a single-use URL cannot lose the video.
+     * If every probe comes back empty the captured URL is still offered to the
+     * player, because that is literally what the website itself played.
+     */
+    private suspend fun webPlayerVideos(
+        slug: String,
+        epNum: String,
+        providerId: String,
+        lang: String,
+        audioBadge: String,
+        timeoutMs: Long,
+    ): List<Video> {
+        val watchUrl = "$baseUrl/watch/$slug?ep=${enc(epNum)}&server=${enc(providerId)}&lang=$lang"
+        val resolved = streamResolver.resolve(watchUrl, timeoutMs)
+        if (resolved.media.isEmpty()) return emptyList()
+
+        val subtitleTracks = resolved.subtitles.map { Track(url = it, lang = "English") }
+
+        resolved.media.firstNotNullOfOrNull { candidate ->
+            videosFromCandidate(candidate, audioBadge, subtitleTracks, null).ifEmpty { null }
+        }?.let { return it }
+
+        return resolved.media.take(1).map { url ->
+            Video(
+                videoUrl = url.withM3u8FragmentIfNeeded(),
+                videoTitle = "Auto $audioBadge",
+                headers = streamHeaders(),
+                subtitleTracks = subtitleTracks,
+            )
+        }
+    }
+
+    private suspend fun fetchServersNew(slug: String): Map<String, EpisodeServersNewDto>? {
         return try {
-            val response = client.newCall(GET(url, headers)).execute()
+            val response = client.newCall(GET("$API_BASE/watch/$slug/serversNew", headers)).execute()
             if (!response.isSuccessful) return null
-            response.parseAs<SourcesResponseDto>(json)
+            response.parseAs<Map<String, EpisodeServersNewDto>>(json)
         } catch (_: Exception) {
             null
         }
-    }
-
-    /**
-     * Turns a raw stream URL into the list of proxy URLs the AniLight web
-     * player itself would try, in order.
-     *
-     * The site removed its public `/proxy` + `/lb/<server>/proxy` shims from
-     * the page markup and now resolves them server-side through a rotating
-     * pool of Cloudflare Workers (`pro-lrvp-*`, `pro-mvp-*`, `pro-mevp-*`, …).
-     * Those worker hostnames change per request, so the only stable entry
-     * point is the API proxy — hardcoding a worker is guaranteed to rot.
-     */
-    private fun proxyCandidates(rawUrl: String, providerId: String): List<String> = when {
-        // krussdomi-hosted CDNs, including the per-provider krussdomi
-        // sub-account that serves soft subs.
-        providerId == "l" || providerId == "raye" -> listOf(apiProxy("lb/$providerId/proxy", rawUrl))
-
-        // animegg progressive MP4s; the worker rewrites them onto vidcache.
-        providerId == "ryu" -> listOf(apiProxy("proxy/ryu", rawUrl))
-
-        // otakuhg embed pages; the endpoint resolves the embed into a stream.
-        providerId == "light" || providerId == "rem" ->
-            listOf("$API_BASE/proxy/light-rem?url=${enc(rawUrl)}&serverId=${enc(providerId)}")
-
-        // The misa CDN rotates between a primary and five mirrors, and the
-        // primary 404s more often than not, so every origin gets a turn.
-        providerId == "misa" -> misaCandidates(rawUrl).map { apiProxy("lb/misa/proxy", it) }
-
-        rawUrl.contains("hls.anidb.app") -> listOf(apiProxy("lb/near/proxy", rawUrl))
-
-        rawUrl.contains("?t.m3u8") -> listOf(apiProxy("lb/mello/proxy", rawUrl))
-
-        rawUrl.contains("bd.24stream.xyz") || rawUrl.contains("bd.aniwatchtv.site") ->
-            listOf(apiProxy("proxy", rawUrl.replace("bd.24stream.xyz", "bd.aniwatchtv.site")))
-
-        else -> listOf(rawUrl)
-    }
-
-    private fun misaCandidates(rawUrl: String): List<String> {
-        val origin = MISA_MIRRORS.firstOrNull { rawUrl.startsWith(it, ignoreCase = true) }
-        if (origin != null) return listOf(rawUrl)
-
-        val base = rawUrl.toHttpUrlOrNull() ?: return listOf(rawUrl)
-        return buildList {
-            add(rawUrl)
-            MISA_MIRRORS.forEach { mirror ->
-                add(base.newBuilder().scheme("https").host(mirror.substringAfter("//")).port(443).build().toString())
-            }
-        }
-    }
-
-    private fun apiProxy(path: String, target: String): String = "$API_BASE/$path?url=${enc(target)}"
-
-    /**
-     * Subtitles that 403 on direct fetches are served through a proxy.
-     *
-     * krussdomi's caption CDN (`subst.` / `subbl.krussdomi.com`) rejects
-     * everything but its own worker — including the site's `/proxy/captions`
-     * route, which answers `Proxy failed with status 403`. Provider "l" uses
-     * `subst.` for every track, which is why its subtitle list renders but
-     * every download failed.
-     */
-    private fun proxyCaption(subUrl: String, providerId: String): String = when {
-        subUrl.contains(KROSSDOMI_HOST) ->
-            apiProxy("lb/${if (providerId == "raye") "raye" else "l"}/proxy", subUrl)
-
-        CAPTION_PROXY_HOSTS.any { subUrl.contains(it) } -> apiProxy("proxy/captions", subUrl)
-
-        else -> subUrl
     }
 
     private suspend fun videosFromCandidate(
@@ -680,10 +667,11 @@ class Anilight : Source() {
             key = PREF_SERVER_KEY
             title = "Preferred Server"
             // Meg is the site's own default embed and exists for nearly every
-            // episode; l, misa, mello, rem and vid are the other consistently
-            // playable providers (verified live 2026-09-19). near is currently
-            // rate-limited at its origin and light/rem/raye drop episodes per
-            // show.
+            // episode. The API's per-episode roster (verified live 2026-10-10)
+            // serves misa/l/mello/raye soft-subbed and light/near/ryu hard-
+            // subbed. Everything but meg sits behind the site's Turnstile
+            // session gate; those are resolved by letting the website's own
+            // player play them in a WebView (see WebViewStreamResolver).
             entries = PROVIDER_ENTRIES
             entryValues = PROVIDER_VALUES
             setDefaultValue(PREF_SERVER_DEFAULT)
@@ -718,72 +706,56 @@ class Anilight : Source() {
     companion object {
         private const val API_BASE = "https://api.anilight.live/api"
 
-        private const val VID_PROVIDER = "vid"
-
         private const val MEG_PROVIDER = "meg"
+
+        private const val TYPE_SOFT_SUB = "soft-sub"
+        private const val TYPE_HARD_SUB = "hard-sub"
 
         /** Entries the website hides from its own server picker. */
         private val HIDDEN_PROVIDER_IDS = listOf("yuki", "vee")
 
         private const val PEEK_BYTES = 64L * 1024L
 
-        /** Providers the site ships in `servers` as of 2026-09-19. */
-        private val FALLBACK_PROVIDERS = listOf(
-            "l" to "Soft Sub, Fast",
-            "light" to "Hard Sub, Fast",
-            "mello" to "Hard Sub, Fast",
-            "misa" to "Soft Sub, Fast",
-            "misora" to "Hard Sub, Fast",
-            "near" to "Hard Sub, Fast",
-            "raye" to "Soft Sub, Fast",
-            "rem" to "Soft Sub, Fast",
-            "ryu" to "Hard Sub, Fast",
-            "vid" to "Hard Sub, Embed",
+        /**
+         * Provider roster `serversNew` ships as of 2026-10-10, used when the
+         * endpoint answers empty: soft sub `l/mello/misa/raye`, hard sub
+         * `light/near/ryu`, and `l/light/misa/near/ryu` for dubs. "kira" exists
+         * in the website's own settings but has not been observed serving an
+         * episode yet.
+         */
+        private val FALLBACK_SERVERS = EpisodeServersNewDto(
+            sub = listOf("l", "mello", "misa", "raye"),
+            hardsub = listOf("light", "near", "ryu"),
+            dub = listOf("l", "light", "misa", "near", "ryu"),
         )
 
         /**
-         * Every server the site can expose, with the same labels the episode's
-         * server list shows. Shared by the "Preferred Server" and
+         * Every server the site can expose since 2026-10-10, labelled with the
+         * audio types it serves. Shared by the "Preferred Server" and
          * "Exclude Servers" pickers so the two can never drift apart.
          */
         private val PROVIDER_ENTRIES = arrayOf(
-            "Meg · Embed",
-            "L · Soft Sub, Fast",
-            "Mello · Hard Sub, Fast",
-            "Misa · Soft Sub, Fast",
-            "Misora · Hard Sub, Fast",
-            "Near · Hard Sub, Fast",
-            "Raye · Soft Sub, Fast",
-            "Rem · Soft Sub, Fast",
-            "Ryu · Hard sub, Fast",
-            "Vid · Hard Sub, Embed",
-            "Light · Hard Sub, Fast",
+            "AniLight · Default",
+            "Kira · Soft Sub, Dub",
+            "L · Soft Sub, Dub",
+            "Light · Hard Sub, Dub",
+            "Mello · Soft Sub",
+            "Misa · Soft Sub, Dub",
+            "Near · Hard Sub, Dub",
+            "Raye · Soft Sub",
+            "Ryu · Hard Sub, Dub",
         )
 
         private val PROVIDER_VALUES = arrayOf(
-            "meg", "l", "mello", "misa", "misora", "near", "raye", "rem", "ryu", "vid", "light",
+            "meg", "kira", "l", "light", "mello", "misa", "near", "raye", "ryu",
         )
-
-        /** Alternate origins the misa CDN rotates through. */
-        private val MISA_MIRRORS = listOf(
-            "https://ncdn.imgnex.top",
-            "https://f0ja7.zhaevor.top",
-            "https://bb.akirax.buzz",
-            "https://xdw5v.qeltrix.top",
-            "https://fetch.nexabloom.top",
-        )
-
-        /**
-         * Caption CDNs that answer 403 to anonymous fetches. krussdomi is
-         * handled separately because it needs its own worker rather than the
-         * `/proxy/captions` route.
-         */
-        private val CAPTION_PROXY_HOSTS = listOf("1oe.lostproject.club")
-
-        private const val KROSSDOMI_HOST = "krussdomi.com"
 
         /** Chunk responses that mean the CDN node is gone rather than flaky. */
         private val DEAD_CHUNK_CODES = setOf(404, 410)
+
+        /** Per-run WebView budget and the ceiling for one audio type. */
+        private const val WEBVIEW_BUDGET_MS = 3_000L
+        private const val RESOLVE_TIMEOUT_MS = 2_000L
 
         private const val PREF_TITLE_LANG_KEY = "pref_title_lang"
         private const val PREF_TITLE_LANG_DEFAULT = "english"
@@ -908,45 +880,16 @@ data class EpisodeDto(
 )
 
 @Serializable
-data class ProviderDto(
-    val id: String? = null,
-    val tip: String? = null,
-    val default: Boolean? = null,
-)
-
-@Serializable
-data class ServersDto(
-    val subProviders: List<ProviderDto>? = null,
-    val dubProviders: List<ProviderDto>? = null,
+data class EpisodeServersNewDto(
+    val sub: List<String>? = null,
+    val hardsub: List<String>? = null,
+    val dub: List<String>? = null,
 )
 
 @Serializable
 data class WatchResponseDto(
     val id: Long? = null,
     val episodes: List<EpisodeDto>? = null,
-    val servers: ServersDto? = null,
-)
-
-@Serializable
-data class SourceStreamDto(
-    val url: String? = null,
-    val quality: String? = null,
-)
-
-@Serializable
-data class TrackDto(
-    val id: String? = null,
-    val url: String? = null,
-    val kind: String? = null,
-    val lang: String? = null,
-    val label: String? = null,
-    val default: Boolean? = null,
-)
-
-@Serializable
-data class SourcesResponseDto(
-    val sources: List<SourceStreamDto>? = null,
-    val tracks: List<TrackDto>? = null,
 )
 
 @Serializable

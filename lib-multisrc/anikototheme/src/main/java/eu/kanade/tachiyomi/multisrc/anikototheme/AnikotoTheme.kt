@@ -23,12 +23,9 @@ import androidx.preference.SwitchPreferenceCompat
 import androidx.preference.newPlainPreference
 import androidx.preference.unselectable
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
-import eu.kanade.tachiyomi.animesource.model.AnimeRelation
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
-import eu.kanade.tachiyomi.animesource.model.SAnimeEpisodeUpdate
-import eu.kanade.tachiyomi.animesource.model.SAnimeSeasonUpdate
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
@@ -474,55 +471,6 @@ abstract class AnikotoTheme : Source() {
         return enrichEpisodesWithMetadata(episodes, detailDoc, malId)
     }
 
-    // ========================== extensions-lib v17 hooks ==========================
-
-    /** This source can surface related entries; see [getRelatedAnimeList]. */
-    override val supportsRelatedAnime: Boolean = true
-
-    /**
-     * Related anime for [anime], taken from Jikan's MAL relations and resolved back to a slug on
-     * this site so the app can open each entry through the normal detail path.
-     */
-    override suspend fun getRelatedAnimeList(anime: SAnime): List<AnimeRelation> {
-        val malId = resolveMalId(anime) ?: return emptyList()
-        val groups = metadataFetcher.fetchRelations(malId)
-        if (groups.isEmpty()) return emptyList()
-        return groups.mapNotNull { (relation, entries) ->
-            val resolved = entries.mapNotNull { entry -> resolveRelatedAnime(entry.title) }
-            if (resolved.isEmpty()) null else AnimeRelation(relation, resolved)
-        }
-    }
-
-    /**
-     * Combined episode/details update (extensions-lib v17). Unlike the legacy full
-     * [getEpisodeList] path this honours the caller's flags and skips work it says it does not need.
-     */
-    override suspend fun getAnimeEpisodeUpdate(
-        anime: SAnime,
-        episodes: List<SEpisode>,
-        fetchDetails: Boolean,
-        fetchEpisodes: Boolean,
-    ): SAnimeEpisodeUpdate {
-        val updatedAnime = if (fetchDetails) runCatching { getAnimeDetails(anime) }.getOrDefault(anime) else anime
-        val updatedEpisodes = if (fetchEpisodes || episodes.isEmpty()) getEpisodeList(anime) else episodes
-        return SAnimeEpisodeUpdate(updatedAnime, updatedEpisodes)
-    }
-
-    /**
-     * Combined season/details update (extensions-lib v17). This theme does not model seasons, so
-     * only the details are refreshed when requested and the caller's list is passed through.
-     */
-    override suspend fun getAnimeSeasonUpdate(
-        anime: SAnime,
-        seasons: List<SAnime>,
-        fetchDetails: Boolean,
-        fetchSeasons: Boolean,
-    ): SAnimeSeasonUpdate {
-        val updatedAnime = if (fetchDetails) runCatching { getAnimeDetails(anime) }.getOrDefault(anime) else anime
-        val updatedSeasons = if (fetchSeasons) runCatching { getSeasonList(anime) }.getOrDefault(seasons) else seasons
-        return SAnimeSeasonUpdate(updatedAnime, updatedSeasons)
-    }
-
     /** MAL id for [anime], from the cache when its episode list was already loaded. */
     private suspend fun resolveMalId(anime: SAnime): String? {
         malIdBySlug[anime.url]?.let { return it }
@@ -583,7 +531,8 @@ abstract class AnikotoTheme : Source() {
                         summary = episodeMeta.description
                     }
                     if (loadTitles && !episodeMeta.title.isNullOrBlank()) {
-                        val epNumStr = if (episode_number % 1 == 0f) episode_number.toInt().toString() else episode_number.toString()
+                        val epNum = episode_number
+                        val epNumStr = if (epNum % 1f == 0f) "${epNum.toInt()}" else "$epNum"
                         name = "Episode $epNumStr: ${episodeMeta.title}"
                     }
                 }
@@ -615,95 +564,107 @@ abstract class AnikotoTheme : Source() {
 
         logi("getHosterList: EpisodeMeta parsed OK: slug=${meta.slug} num=${meta.epNum} mal=${meta.malId} ts=${meta.timestamp} hasSub=${meta.hasSub} hasDub=${meta.hasDub}")
 
-        val tasks = mutableListOf<HosterTask>()
-
-        // PATH A: Primary Server List
-        if (meta.dataIds.isNotEmpty()) {
-            val primaryUrl = "$baseUrl/ajax/server/list?servers=${meta.dataIds}"
-            logi("PATH A: GET $primaryUrl")
-            try {
-                val primaryResponse = client.newCall(GET(primaryUrl, ajaxHeaders(meta.slug))).execute()
-                val pJson = json.decodeFromString<ServerListResponse>(primaryResponse.body.string())
-                logi("PATH A: parsed status=${pJson.status}, result HTML length = ${pJson.result.length}")
-                if (pJson.status == 200 && pJson.result.isNotEmpty()) {
-                    val pDoc = Jsoup.parse(pJson.result)
-                    // The server list HTML is a fragment whose type wrappers may be the
-                    // document root's direct children — select from the fragment root and
-                    // also fall back to any bare server entries (some skins omit types).
-                    val typeBlocks = pDoc.select(typeSelector)
-                    if (typeBlocks.isNotEmpty()) {
-                        for (element in typeBlocks) {
-                            parseServerBlock(element, tasks, meta)
-                        }
-                    } else {
-                        for (serverElement in pDoc.select(serverSelector)) {
-                            var linkId = serverElement.attr("data-link-id")
-                            if (linkId.isEmpty()) linkId = serverElement.attr("data-id")
-                            val serverName = serverElement.text().trim()
-                            if (serverName.isEmpty()) {
-                                continue
-                            }
-                            if (linkId.isNotEmpty()) {
-                                val label = "SUB - $serverName"
-                                tasks.add(HosterTask(label, linkId, "sub", "primary", meta.slug))
-                                logi("  + task (primary, typeless): $label")
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                loge("PATH A: FAILED — continuing to mapper", e)
-            }
-        }
-
-        // PATH B: Nekostream Mapper API (Kiwi-Stream)
-        if (useMapper) {
-            val enableKiwi = preferences.getBoolean(PREF_ENABLE_KIWI_KEY, PREF_ENABLE_KIWI_DEFAULT)
-            if (!enableKiwi) {
-                logi("PATH B: skipped (Kiwi-Stream disabled in settings)")
-            } else if (meta.malId.isEmpty() || meta.epNum.isEmpty() || meta.timestamp.isEmpty()) {
-                loge("PATH B: skipped (missing malId/epNum/timestamp in EpisodeMeta)")
-            } else {
-                val mapperUrl = "https://mapper.nekostream.site/api/mal/${meta.malId}/${meta.epNum}/${meta.timestamp}"
-                logi("PATH B: GET $mapperUrl")
-                try {
-                    val mapperResponse = client.newCall(GET(mapperUrl, ajaxHeaders(meta.slug))).execute()
-                    if (mapperResponse.isSuccessful) {
-                        val bodyStr = mapperResponse.body.string()
-                        val jsonObj = json.decodeFromString<JsonObject>(bodyStr)
-                        val mapperTokens = parseMapperResponse(jsonObj)
-                        logi("PATH B: parsed ${mapperTokens.size} mapper tokens")
-
-                        if (mapperTokens.isEmpty()) {
-                            val keys = jsonObj.keys
-                            if (keys.any { it == "Kiwi-Stream" }) {
-                                logi("PATH B: Kiwi-Stream has download links but no streaming URL — streaming not available for this episode")
+        val tasks = coroutineScope {
+            val pathATask = async(Dispatchers.IO) {
+                val primaryTasks = mutableListOf<HosterTask>()
+                if (meta.dataIds.isNotEmpty()) {
+                    val primaryUrl = "$baseUrl/ajax/server/list?servers=${meta.dataIds}"
+                    logi("PATH A: GET $primaryUrl")
+                    try {
+                        val primaryResponse = client.newCall(GET(primaryUrl, ajaxHeaders(meta.slug))).execute()
+                        val pJson = json.decodeFromString<ServerListResponse>(primaryResponse.body.string())
+                        logi("PATH A: parsed status=${pJson.status}, result HTML length = ${pJson.result.length}")
+                        if (pJson.status == 200 && pJson.result.isNotEmpty()) {
+                            val pDoc = Jsoup.parse(pJson.result)
+                            // The server list HTML is a fragment whose type wrappers may be the
+                            // document root's direct children — select from the fragment root and
+                            // also fall back to any bare server entries (some skins omit types).
+                            val typeBlocks = pDoc.select(typeSelector)
+                            if (typeBlocks.isNotEmpty()) {
+                                for (element in typeBlocks) {
+                                    parseServerBlock(element, primaryTasks, meta)
+                                }
                             } else {
-                                logi("PATH B: no Kiwi-Stream entries found in mapper response")
+                                for (serverElement in pDoc.select(serverSelector)) {
+                                    var linkId = serverElement.attr("data-link-id")
+                                    if (linkId.isEmpty()) linkId = serverElement.attr("data-id")
+                                    val serverName = serverElement.text().trim()
+                                    if (serverName.isEmpty()) {
+                                        continue
+                                    }
+                                    if (linkId.isNotEmpty()) {
+                                        val label = "SUB - $serverName"
+                                        primaryTasks.add(HosterTask(label, linkId, "sub", "primary", meta.slug))
+                                        logi("  + task (primary, typeless): $label")
+                                    }
+                                }
                             }
                         }
+                    } catch (e: Exception) {
+                        loge("PATH A: FAILED — continuing to mapper", e)
+                    }
+                }
+                primaryTasks
+            }
 
-                        for (token in mapperTokens) {
-                            val audioLabel = when (token.audio) {
-                                "dub" -> "DUB"
-                                "sub" -> "SUB"
-                                "hsub" -> "HSUB"
-                                else -> token.audio.uppercase(Locale.ROOT)
+            val pathBTask = async(Dispatchers.IO) {
+                val mapperTasks = mutableListOf<HosterTask>()
+                if (useMapper) {
+                    val enableKiwi = preferences.getBoolean(PREF_ENABLE_KIWI_KEY, PREF_ENABLE_KIWI_DEFAULT)
+                    if (!enableKiwi) {
+                        logi("PATH B: skipped (Kiwi-Stream disabled in settings)")
+                    } else if (meta.malId.isEmpty() || meta.epNum.isEmpty() || meta.timestamp.isEmpty()) {
+                        loge("PATH B: skipped (missing malId/epNum/timestamp in EpisodeMeta)")
+                    } else {
+                        val mapperUrl = "https://mapper.nekostream.site/api/mal/${meta.malId}/${meta.epNum}/${meta.timestamp}"
+                        logi("PATH B: GET $mapperUrl")
+                        try {
+                            val mapperClient = client.newBuilder()
+                                .connectTimeout(4, TimeUnit.SECONDS)
+                                .readTimeout(6, TimeUnit.SECONDS)
+                                .build()
+                            val mapperResponse = mapperClient.newCall(GET(mapperUrl, ajaxHeaders(meta.slug))).execute()
+                            if (mapperResponse.isSuccessful) {
+                                val bodyStr = mapperResponse.body.string()
+                                val jsonObj = json.decodeFromString<JsonObject>(bodyStr)
+                                val mapperTokens = parseMapperResponse(jsonObj)
+                                logi("PATH B: parsed ${mapperTokens.size} mapper tokens")
+
+                                if (mapperTokens.isEmpty()) {
+                                    val keys = jsonObj.keys
+                                    if (keys.any { it == "Kiwi-Stream" }) {
+                                        logi("PATH B: Kiwi-Stream has download links but no streaming URL — streaming not available for this episode")
+                                    } else {
+                                        logi("PATH B: no Kiwi-Stream entries found in mapper response")
+                                    }
+                                }
+
+                                for (token in mapperTokens) {
+                                    val audioLabel = when (token.audio) {
+                                        "dub" -> "DUB"
+                                        "sub" -> "SUB"
+                                        "hsub" -> "HSUB"
+                                        else -> token.audio.uppercase(Locale.ROOT)
+                                    }
+                                    if (token.serverName == "Kiwi-Stream") {
+                                        val serverName = token.serverName
+                                        val label = "$audioLabel - $serverName"
+                                        mapperTasks.add(HosterTask(label, token.token, token.audio, "mapper", meta.slug))
+                                        logi("  + task (mapper): $label")
+                                    }
+                                }
                             }
-                            if (token.serverName == "Kiwi-Stream") {
-                                val serverName = token.serverName
-                                val label = "$audioLabel - $serverName"
-                                tasks.add(HosterTask(label, token.token, token.audio, "mapper", meta.slug))
-                                logi("  + task (mapper): $label")
-                            }
+                        } catch (e: Exception) {
+                            loge("PATH B: mapper FAILED — continuing with primary tasks", e)
                         }
                     }
-                } catch (e: Exception) {
-                    loge("PATH B: mapper FAILED — continuing with primary tasks", e)
+                } else {
+                    logi("PATH B: skipped (useMapper is false for this source)")
                 }
+                mapperTasks
             }
-        } else {
-            logi("PATH B: skipped (useMapper is false for this source)")
+
+            (pathATask.await() + pathBTask.await()).toMutableList()
         }
 
         logi("getHosterList: total servers found = ${tasks.size}")

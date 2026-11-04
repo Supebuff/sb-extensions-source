@@ -86,11 +86,8 @@ class KwikExtractor(
             headers = kwikHeaders.newBuilder()
                 .set("Referer", hlsStream.referer)
                 .build(),
-            initialized = true,
         )
     }
-
-    suspend fun getHlsStreamUrl(kwikUrl: String, referer: String): String = getHlsStream(kwikUrl, referer).url
 
     private suspend fun getHlsStream(kwikUrl: String, referer: String): HlsStream = client.newCall(GET(kwikUrl, headers.newBuilder().set("Referer", referer).build()))
         .awaitSuccess().use { response ->
@@ -114,7 +111,6 @@ class KwikExtractor(
             videoUrl = videoUrl,
             videoTitle = quality,
             headers = kwikHeaders,
-            initialized = true,
         )
     }
 

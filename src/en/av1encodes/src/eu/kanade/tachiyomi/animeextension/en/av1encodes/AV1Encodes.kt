@@ -6,10 +6,13 @@ import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import extensions.utils.Source
 import keiyoushi.utils.bodyString
@@ -37,10 +40,10 @@ class AV1Encodes : Source() {
     override val supportsLatest = true
 
     override val baseUrl: String
-        get() = preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT)!!
+        get() = preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT) ?: PREF_DOMAIN_DEFAULT
 
     private val prefQuality: String
-        get() = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
+        get() = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT) ?: PREF_QUALITY_DEFAULT
 
     override val client: OkHttpClient = network.client.newBuilder()
         .dispatcher(Dispatcher().apply { maxRequestsPerHost = 10 })
@@ -48,22 +51,101 @@ class AV1Encodes : Source() {
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .set("User-Agent", DESKTOP_UA)
-        .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-        .add("Accept-Language", "en-US,en;q=0.9")
-        .add("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\"")
-        .add("Sec-Ch-Ua-Mobile", "?0")
-        .add("Sec-Ch-Ua-Platform", "\"Windows\"")
-        .add("Sec-Fetch-Dest", "document")
-        .add("Sec-Fetch-Mode", "navigate")
-        .add("Sec-Fetch-Site", "none")
+        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+        .set("Accept-Language", "en-US,en;q=0.9")
+        .set("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\"")
+        .set("Sec-Ch-Ua-Mobile", "?0")
+        .set("Sec-Ch-Ua-Platform", "\"Windows\"")
+        .set("Sec-Fetch-Dest", "document")
+        .set("Sec-Fetch-Mode", "navigate")
+        .set("Sec-Fetch-Site", "same-origin")
+        .set("Sec-Fetch-User", "?1")
+        .set("Upgrade-Insecure-Requests", "1")
+        .set("Referer", "${runCatching { baseUrl }.getOrDefault(PREF_DOMAIN_DEFAULT)}/")
+
+    private fun getVideoHeaders(): Headers = Headers.Builder()
+        .set("User-Agent", DESKTOP_UA)
+        .set("Referer", "${runCatching { baseUrl }.getOrDefault(PREF_DOMAIN_DEFAULT)}/")
+        .build()
+
+    private val noRedirectClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+    }
 
     // ══════════════════════════════════════════════════════════════════════════
     // POPULAR
     // ══════════════════════════════════════════════════════════════════════════
 
-    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/stats#top-downloads", headers)
+    override fun popularAnimeRequest(page: Int): Request = if (page == 1) {
+        GET(baseUrl, headers)
+    } else {
+        GET("$baseUrl/anime?page=$page", headers)
+    }
 
-    override fun popularAnimeParse(response: Response): AnimesPage = AnimesPage(parseStatsPage(response.useAsJsoup()), false)
+    override fun popularAnimeParse(response: Response): AnimesPage {
+        val doc = response.useAsJsoup()
+        val path = response.request.url.encodedPath
+        return if (path == "/" || path.isBlank()) {
+            parseHomePage(doc)
+        } else {
+            parseAnimeListPage(doc)
+        }
+    }
+
+    private fun parseHomePage(doc: Document): AnimesPage {
+        val spotlights = doc.select("article.spotlight-slide").mapNotNull { slide ->
+            val a = slide.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
+            val href = a.attr("href").let {
+                if (it.startsWith("http")) it.removePrefix(baseUrl) else it
+            }
+            if (!href.startsWith("/anime/") || href == "/anime/") return@mapNotNull null
+            val titleText = slide.selectFirst(".spotlight-title, h3, h4")?.text()?.trim()
+                ?: a.text().trim()
+            if (titleText.isBlank() || titleText.equals("Watch Now", ignoreCase = true)) return@mapNotNull null
+            val img = slide.selectFirst("img.spotlight-backdrop, img")
+            val imgUrl = extractImgUrl(img) ?: extractBg(slide)
+            SAnime.create().apply {
+                setUrlWithoutDomain(href)
+                title = titleText
+                thumbnail_url = imgUrl
+            }
+        }
+
+        val cards = doc.select(
+            "article.anime-card, article[class*='card'], div.anime-item, .anime-item, .sidebar-list-panel li, .sidebar-list-panel article, section.content-layout article",
+        ).mapNotNull { card ->
+            val a = if (card.tagName() == "a") {
+                card
+            } else {
+                card.selectFirst("h3 > a, h4 > a, .card-body a, a[href*='/anime/']")
+                    ?: return@mapNotNull null
+            }
+            val href = a.attr("href").let {
+                if (it.startsWith("http")) it.removePrefix(baseUrl) else it
+            }
+            if (!href.startsWith("/anime/") || href == "/anime/") return@mapNotNull null
+            val titleText = card.selectFirst("h3, h4")?.text()?.trim() ?: a.text().trim()
+            if (titleText.isBlank() || titleText.equals("Watch Now", ignoreCase = true)) return@mapNotNull null
+            val img = card.selectFirst("div.poster-wrap > img, img")
+            val imgUrl = extractImgUrl(img) ?: extractBg(card)
+            SAnime.create().apply {
+                setUrlWithoutDomain(href)
+                title = titleText
+                thumbnail_url = imgUrl
+            }
+        }
+
+        val allAnimes = (spotlights + cards).distinctBy { it.url }
+        if (allAnimes.isNotEmpty()) {
+            return AnimesPage(allAnimes.fetchMissingCovers(), hasNextPage = true)
+        }
+
+        // Fallback to stats page parser if homepage cards were not found
+        return AnimesPage(parseStatsPage(doc), false)
+    }
 
     private val seasonRegex by lazy { Regex("""\[S\d""") }
     private val animeNameRegex by lazy { Regex("""\[S\d{1,2}(?:-E\d+)?]\s*([^\[]+?)\s*\[""") }
@@ -236,10 +318,14 @@ class AV1Encodes : Source() {
 
     private fun parseCardList(doc: Document): AnimesPage {
         // Try article cards first (same structure as latestUpdatesParse)
-        var animes = doc.select("article.anime-card, article[class*='card'], article[class*='anime']")
+        var animes = doc.select("article.anime-card, article[class*='card'], article[class*='anime'], div.anime-item, .anime-item")
             .mapNotNull { card ->
-                val a = card.selectFirst("h3 > a, h4 > a, .card-body a, a[href*='/anime/']")
-                    ?: return@mapNotNull null
+                val a = if (card.tagName() == "a") {
+                    card
+                } else {
+                    card.selectFirst("h3 > a, h4 > a, .card-body a, a.anime-link, a[href*='/anime/']")
+                        ?: return@mapNotNull null
+                }
                 val href = a.attr("href").let {
                     if (it.startsWith("http")) it.removePrefix(baseUrl) else it
                 }
@@ -297,11 +383,11 @@ class AV1Encodes : Source() {
     // ══════════════════════════════════════════════════════════════════════════
 
     private fun parseAnimeListPage(doc: Document): AnimesPage {
-        val animes = doc.select("li > a[href*='/anime/']").mapNotNull { a ->
+        val animes = doc.select("li.anime-index-item > a, li > a[href*='/anime/']").mapNotNull { a ->
             val href = a.attr("href").let {
                 if (it.startsWith("http")) it.removePrefix(baseUrl) else it
             }
-            if (!href.startsWith("/anime/") || href == "/anime/") return@mapNotNull null
+            if (!href.startsWith("/anime/") || href == "/anime/" || href == "/anime/list") return@mapNotNull null
             val titleText = a.text().trim().ifBlank { return@mapNotNull null }
             SAnime.create().apply {
                 setUrlWithoutDomain(href)
@@ -310,7 +396,7 @@ class AV1Encodes : Source() {
         }.distinctBy { it.url }
 
         val hasNextPage = doc.selectFirst(
-            "a[rel=next], .pagination .next, a:contains(Next)",
+            "a.next-page, a[rel=next], .pagination .next, a:contains(Next)",
         ) != null
 
         return AnimesPage(animes.fetchMissingCovers(), hasNextPage)
@@ -322,8 +408,8 @@ class AV1Encodes : Source() {
 
     private fun List<SAnime>.fetchMissingCovers(): List<SAnime> {
         return parallelMapNotNullBlocking { anime ->
+            if (anime.thumbnail_url != null) return@parallelMapNotNullBlocking anime
             runCatching {
-                if (anime.thumbnail_url != null) return@runCatching anime
                 val doc = client.newCall(animeDetailsRequest(anime)).awaitSuccess().useAsJsoup()
                 val img = doc.selectFirst(
                     "img.anime-poster, img.poster, .anime-hero img, " +
@@ -333,7 +419,7 @@ class AV1Encodes : Source() {
                     img?.attr("abs:data-src")?.ifBlank { img.attr("abs:src") }
                         ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
                 anime
-            }.getOrNull()
+            }.getOrDefault(anime)
         }
     }
 
@@ -373,6 +459,7 @@ class AV1Encodes : Source() {
             } else {
                 SAnime.COMPLETED
             }
+            initialized = true
         }
     }
 
@@ -395,183 +482,355 @@ class AV1Encodes : Source() {
             .ifEmpty { listOf("1") }
         Log.d(TAG, "episodeListParse: seasons=$seasons")
 
-        val encodedRes = URLEncoder.encode(prefQuality, "UTF-8").replace("+", "%20")
-
         val episodeNumberRegex = Regex("""E(\d+)""", RegexOption.IGNORE_CASE)
+        val qualityList = listOf(prefQuality) + QUALITY_VALUES.filter { it != prefQuality }
 
         return seasons.sortedByDescending { it.toIntOrNull() ?: 0 }.parallelCatchingFlatMapBlocking { season ->
-            val epPageUrl = "$baseUrl/episodes/$slug/$season/$encodedRes"
-            Log.d(TAG, "episodeListParse: fetching episodes page → $epPageUrl")
+            for (quality in qualityList) {
+                val encodedRes = URLEncoder.encode(quality, "UTF-8").replace("+", "%20")
+                val epPageUrl = "$baseUrl/episodes/$slug/$season/$encodedRes"
+                Log.d(TAG, "episodeListParse: fetching episodes page → $epPageUrl")
 
-            val epHtml = client.newCall(GET(epPageUrl, headers)).awaitSuccess().bodyString()
+                val epHtml = try {
+                    client.newCall(
+                        GET(epPageUrl, headers.newBuilder().set("Referer", "$baseUrl/anime/$slug").build()),
+                    ).awaitSuccess().bodyString()
+                } catch (e: Exception) {
+                    Log.w(TAG, "episodeListParse: failed for $epPageUrl: ${e.message}")
+                    continue
+                }
 
-            val epDoc = Jsoup.parse(epHtml)
-            val downloadLinks = epDoc.select("a[href*='/download/']")
-            Log.d(TAG, "episodeListParse: found ${downloadLinks.size} download links for season $season")
+                if (epHtml.contains("Access Blocked")) {
+                    Log.w(TAG, "episodeListParse: access blocked for $epPageUrl")
+                    continue
+                }
 
-            if (downloadLinks.isEmpty()) {
-                Log.w(TAG, "episodeListParse: no <a> links found, falling back to regex on raw HTML")
+                if (epHtml.trim().startsWith("[")) {
+                    val items = runCatching { epHtml.parseAs<List<EpisodeItem>>() }.getOrNull()
+                    if (!items.isNullOrEmpty()) {
+                        Log.d(TAG, "episodeListParse: JSON array found ${items.size} episodes")
+                        return@parallelCatchingFlatMapBlocking items.sortedByDescending { it.num }.map { item ->
+                            val fn = Uri.decode(item.href.substringBefore("?").substringAfterLast("/"))
+                            val epNum = if (item.num > 0) item.num.toFloat() else parseEpisodeNumber(fn, season)
+                            val finalNum = if (item.num > 0) {
+                                val s = season.toIntOrNull() ?: 1
+                                if (s > 1) ((s - 1) * 100 + epNum) else epNum
+                            } else {
+                                epNum
+                            }
+                            SEpisode.create().apply {
+                                setUrlWithoutDomain(item.href)
+                                name = if (item.label.isNotBlank()) {
+                                    val audioTag = if (item.audio.isNotBlank()) " [${item.audio}]" else ""
+                                    if (season != "1" && season.isNotBlank()) {
+                                        "Season $season Ep ${item.num} - ${item.label}$audioTag"
+                                    } else {
+                                        "Ep ${item.num} - ${item.label}$audioTag"
+                                    }
+                                } else {
+                                    buildEpisodeLabel(fn, season)
+                                }
+                                episode_number = finalNum
+                            }
+                        }
+                    }
+                }
+
+                val epDoc = Jsoup.parse(epHtml)
+                val downloadLinks = epDoc.select("a[href*='/download/']")
+                Log.d(TAG, "episodeListParse: found ${downloadLinks.size} download links for season $season (quality $quality)")
+
+                if (downloadLinks.isNotEmpty()) {
+                    return@parallelCatchingFlatMapBlocking downloadLinks.sortedByDescending { link ->
+                        episodeNumberRegex.find(link.attr("href"))?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    }.map { link ->
+                        val fullHref = link.attr("href")
+                        val filename = Uri.decode(fullHref.substringBefore("?").substringAfterLast("/"))
+                        SEpisode.create().apply {
+                            setUrlWithoutDomain(fullHref)
+                            name = buildEpisodeLabel(filename, season)
+                            episode_number = parseEpisodeNumber(filename, season)
+                        }
+                    }
+                }
+
                 val filenames = extractFilenames(epHtml)
-                Log.d(TAG, "episodeListParse: regex found ${filenames.size} filenames")
-                return@parallelCatchingFlatMapBlocking filenames.sortedByDescending { parseEpisodeNumber(it) }.map { filename ->
-                    val encodedFilename = URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
-                    SEpisode.create().apply {
-                        setUrlWithoutDomain("/download/$slug/$season/$encodedRes/$encodedFilename")
-                        name = buildEpisodeLabel(filename, season)
-                        episode_number = parseEpisodeNumber(filename)
+                if (filenames.isNotEmpty()) {
+                    Log.d(TAG, "episodeListParse: regex found ${filenames.size} filenames")
+                    return@parallelCatchingFlatMapBlocking filenames.sortedByDescending { parseEpisodeNumber(it, season) }.map { filename ->
+                        val encodedFilename = URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
+                        SEpisode.create().apply {
+                            setUrlWithoutDomain("/download/$slug/$season/$encodedRes/$encodedFilename")
+                            name = buildEpisodeLabel(filename, season)
+                            episode_number = parseEpisodeNumber(filename, season)
+                        }
                     }
                 }
             }
-
-            downloadLinks.sortedByDescending { link ->
-                episodeNumberRegex
-                    .find(link.attr("href"))?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            }.map { link ->
-                val fullHref = link.attr("href")
-                Log.d(TAG, "episodeListParse: episode link → $fullHref")
-
-                val filename = Uri.decode(fullHref.substringAfterLast("/").substringBefore("?"))
-
-                SEpisode.create().apply {
-                    setUrlWithoutDomain(fullHref)
-                    name = buildEpisodeLabel(filename, season)
-                    episode_number = parseEpisodeNumber(filename)
-                }
-            }
+            emptyList()
         }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // VIDEO LIST
+    // HOSTER & VIDEO LIST
     // ══════════════════════════════════════════════════════════════════════════
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val episodeUrl = episode.url
-        Log.d(TAG, "getVideoList: episode.url=$episodeUrl")
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val hosters = mutableListOf<Hoster>()
+        hosters.add(Hoster(hosterName = "Stream", hosterUrl = "${episode.url}#server=Stream"))
+        hosters.add(Hoster(hosterName = "Dash", hosterUrl = "${episode.url}#server=Dash"))
+        hosters.add(Hoster(hosterName = "Direct DL", hosterUrl = "${episode.url}#server=Direct DL"))
+        if (preferences.getBoolean(PREF_SHOW_TORRENT_KEY, PREF_SHOW_TORRENT_DEFAULT)) {
+            hosters.add(Hoster(hosterName = "Torrent", hosterUrl = "${episode.url}#server=Torrent"))
+        }
 
-        val encodedFilename = episodeUrl.substringBefore("?").substringAfterLast("/")
+        val prefLinkType = preferences.getString(PREF_LINK_TYPE_KEY, PREF_LINK_TYPE_DEFAULT) ?: PREF_LINK_TYPE_DEFAULT
+        return hosters.sortedByDescending { it.hosterName.equals(prefLinkType, ignoreCase = true) }
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val serverName = hoster.hosterName
+        val episodeUrl = hoster.hosterUrl.substringBefore("#server=")
+        val allVideos = extractAllVideos(episodeUrl)
+        val filtered = allVideos.filter { it.videoTitle.contains(serverName, ignoreCase = true) }
+        return if (filtered.isNotEmpty()) filtered else allVideos
+    }
+
+    override suspend fun getVideoList(episode: SEpisode): List<Video> = extractAllVideos(episode.url).sortVideos()
+
+    private suspend fun extractAllVideos(episodeUrl: String): List<Video> {
+        Log.d(TAG, "extractAllVideos: episodeUrl=$episodeUrl")
+
+        val cleanPath = episodeUrl.substringBefore("?")
+        val pathSegments = cleanPath.split("/").filter { it.isNotBlank() }
+        val slug = if (pathSegments.size >= 2) pathSegments[1] else ""
+        val season = if (pathSegments.size >= 3) pathSegments[2] else "1"
+        val resSegment = if (pathSegments.size >= 4) pathSegments[3] else ""
+        val encodedFilename = pathSegments.lastOrNull() ?: ""
         val filename = Uri.decode(encodedFilename)
-        Log.d(TAG, "getVideoList: filename=$filename")
+        Log.d(TAG, "extractAllVideos: slug=$slug season=$season res=$resSegment filename=$filename")
 
-        val downloadPageUrl = baseUrl + episodeUrl
+        var downloadPageUrl = if (episodeUrl.startsWith("http")) episodeUrl else baseUrl + episodeUrl
 
-        Log.d(TAG, "getVideoList: fetching download page → $downloadPageUrl")
-        val pageHtml = try {
+        var pageHtml = try {
             client.newCall(
                 GET(downloadPageUrl, headers.newBuilder().set("Referer", "$baseUrl/").build()),
-            ).awaitSuccess()
-                .bodyString()
+            ).awaitSuccess().bodyString()
         } catch (e: Exception) {
-            Log.e(TAG, "getVideoList: download page failed — ${e.message}")
-            return fallbackDirectUrl(episodeUrl, filename)
+            Log.e(TAG, "extractAllVideos: initial download page failed — ${e.message}")
+            ""
         }
 
-        val ddlToken = Regex("""['"](A{4,}[A-Za-z0-9_\-]{10,})['"]""").find(pageHtml)
-            ?.groupValues?.get(1)
-            ?: run {
-                Log.w(TAG, "getVideoList: no ddl-token found in page, falling back")
-                return fallbackDirectUrl(episodeUrl, filename)
+        var ddlToken = extractDdlToken(pageHtml)
+
+        // If token missing or page blocked/expired, re-fetch fresh download URL from episode list page
+        if (ddlToken == null && slug.isNotBlank() && resSegment.isNotBlank()) {
+            val epPageUrl = "$baseUrl/episodes/$slug/$season/$resSegment"
+            Log.d(TAG, "extractAllVideos: re-fetching fresh token from $epPageUrl")
+            val freshHtml = try {
+                client.newCall(
+                    GET(epPageUrl, headers.newBuilder().set("Referer", "$baseUrl/anime/$slug").build()),
+                ).awaitSuccess().bodyString()
+            } catch (e: Exception) {
+                Log.e(TAG, "extractAllVideos: fresh ep page failed — ${e.message}")
+                ""
             }
-        Log.d(TAG, "getVideoList: ddlToken=$ddlToken")
 
-        val ddlUrl = "$baseUrl/get_ddl/$encodedFilename"
-        Log.d(TAG, "getVideoList: calling get_ddl → $ddlUrl")
-        val ddlRaw = try {
-            client.newCall(
-                GET(
-                    ddlUrl,
-                    headers.newBuilder()
-                        .set("Accept", "application/json")
-                        .set("Referer", downloadPageUrl)
-                        .set("X-Ddl-Token", ddlToken)
-                        .build(),
-                ),
-            ).awaitSuccess()
-                .bodyString()
-        } catch (e: Exception) {
-            Log.e(TAG, "getVideoList: get_ddl failed — ${e.message}")
-            return fallbackDirectUrl(episodeUrl, filename)
-        }
-        Log.d(TAG, "getVideoList: get_ddl response=$ddlRaw")
+            if (freshHtml.isNotBlank() && !freshHtml.contains("Access Blocked")) {
+                val freshLink = Jsoup.parse(freshHtml)
+                    .select("a[href*='/download/']")
+                    .firstOrNull { it.attr("href").contains(encodedFilename) || Uri.decode(it.attr("href")).contains(filename) }
+                    ?.attr("href")
 
-        val ddl = try {
-            ddlRaw.parseAs<DdlResponse>()
-        } catch (e: Exception) {
-            Log.e(TAG, "getVideoList: get_ddl parse failed — ${e.message}")
-            return fallbackDirectUrl(episodeUrl, filename)
-        }
-        if (!ddl.success) {
-            Log.w(TAG, "getVideoList: get_ddl success=false")
-            return fallbackDirectUrl(episodeUrl, filename)
+                if (!freshLink.isNullOrBlank()) {
+                    downloadPageUrl = if (freshLink.startsWith("http")) freshLink else baseUrl + freshLink
+                    Log.d(TAG, "extractAllVideos: fetched fresh downloadPageUrl=$downloadPageUrl")
+                    pageHtml = try {
+                        client.newCall(
+                            GET(downloadPageUrl, headers.newBuilder().set("Referer", "$baseUrl/").build()),
+                        ).awaitSuccess().bodyString()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "extractAllVideos: fresh download page failed — ${e.message}")
+                        ""
+                    }
+                    ddlToken = extractDdlToken(pageHtml)
+                }
+            }
         }
 
         val videos = mutableListOf<Video>()
-
+        val ext = if (filename.endsWith(".mp4", ignoreCase = true)) ".mp4" else ".mkv"
         val resLabel = Regex("""\[(\d+p)]""").find(filename)?.groupValues?.get(1) ?: prefQuality
         val audioTag = Regex("""\[(Dual|Sub|Dub)]""", RegexOption.IGNORE_CASE)
             .find(filename)?.groupValues?.get(1) ?: ""
         val audioSuffix = if (audioTag.isNotBlank()) " [$audioTag]" else ""
-        val sizeLabel = ddl.fileSize?.let { " · $it" } ?: ""
-        val qualLabel = "AV1 · $resLabel$audioSuffix$sizeLabel"
 
-        suspend fun resolveRedirect(path: String?): String? {
-            if (path.isNullOrBlank()) return null
-            val url = if (path.startsWith("/")) "$baseUrl$path" else path
-            return try {
-                val finalUrl = client.newCall(GET(url, headers.newBuilder().set("Referer", "$baseUrl/").build()))
-                    .awaitSuccess().use { resp ->
-                        resp.request.url.toString()
-                    }
-                Log.d(TAG, "getVideoList: redirect $path → $finalUrl")
-                finalUrl
+        if (!ddlToken.isNullOrBlank()) {
+            val ddlUrl = "$baseUrl/get_ddl/$encodedFilename"
+            Log.d(TAG, "extractAllVideos: calling get_ddl → $ddlUrl with token=$ddlToken")
+            val ddlRaw = try {
+                client.newCall(
+                    GET(
+                        ddlUrl,
+                        headers.newBuilder()
+                            .set("Accept", "application/json")
+                            .set("Referer", downloadPageUrl)
+                            .set("Sec-Fetch-Dest", "empty")
+                            .set("Sec-Fetch-Mode", "cors")
+                            .set("Sec-Fetch-Site", "same-origin")
+                            .set("X-DDL-Token", ddlToken)
+                            .build(),
+                    ),
+                ).awaitSuccess().bodyString()
             } catch (e: Exception) {
-                Log.e(TAG, "getVideoList: redirect failed for $path — ${e.message}")
-                null
+                Log.e(TAG, "extractAllVideos: get_ddl failed — ${e.message}")
+                ""
+            }
+
+            val ddl = runCatching { ddlRaw.parseAs<DdlResponse>() }.getOrNull()
+            if (ddl != null && ddl.success) {
+                val sizeLabel = ddl.fileSize?.let { " · $it" } ?: ""
+                val qualLabel = "AV1 · $resLabel$audioSuffix$sizeLabel"
+                val vHeaders = getVideoHeaders()
+
+                val resolvedStream = resolveRedirect(ddl.streamLink)
+                val resolvedWatch = resolveRedirect(ddl.watchLink)
+                val resolvedDl = resolveRedirect(ddl.downloadLink ?: ddl.ddl)
+                val primaryCdnUrl = resolvedStream ?: resolvedWatch ?: resolvedDl
+
+                if (primaryCdnUrl != null) {
+                    val dlUrl = toDlUrl(resolvedDl ?: primaryCdnUrl, ext)
+                    val streamUrl = toStreamUrl(resolvedStream ?: primaryCdnUrl, ext)
+
+                    Log.d(TAG, "extractAllVideos: Direct DL → $dlUrl")
+                    videos.add(Video(videoUrl = dlUrl, videoTitle = "$qualLabel · Direct DL", headers = vHeaders))
+
+                    Log.d(TAG, "extractAllVideos: Stream → $streamUrl")
+                    videos.add(Video(videoUrl = streamUrl, videoTitle = "$qualLabel · Stream", headers = vHeaders))
+                }
+
+                if (preferences.getBoolean(PREF_SHOW_TORRENT_KEY, PREF_SHOW_TORRENT_DEFAULT)) {
+                    val rawTorrent = ddl.torrentLink
+                    if (!rawTorrent.isNullOrBlank()) {
+                        val torrentUrl = if (rawTorrent.startsWith("magnet:")) rawTorrent else resolveRedirect(rawTorrent)
+                        if (torrentUrl != null) {
+                            Log.d(TAG, "extractAllVideos: torrent URL → $torrentUrl")
+                            videos.add(Video(videoUrl = torrentUrl, videoTitle = "$qualLabel · Torrent", headers = vHeaders))
+                        }
+                    }
+                }
             }
         }
 
-        val watchUrl = resolveRedirect(ddl.watchLink)
-        if (watchUrl != null && watchUrl.contains("/watch/")) {
-            val dashBase = watchUrl.replace("/watch/", "/dash/")
-            val mpdUrl = "$dashBase/manifest.mpd"
-            Log.d(TAG, "getVideoList: DASH MPD → $mpdUrl")
-            videos.add(Video(videoUrl = mpdUrl, videoTitle = "$qualLabel · DASH"))
+        // If no videos yet, check if page has direct video player iframe or fallback links
+        if (videos.isEmpty() && pageHtml.isNotBlank()) {
+            val qualLabel = "AV1 · $resLabel$audioSuffix"
+            val vHeaders = getVideoHeaders()
+
+            val doc = Jsoup.parse(pageHtml)
+            val iframe = doc.selectFirst("iframe#anime-video-player, iframe[src*='/r/'], iframe[src*='/watch/'], iframe[src*='/dash/'], iframe[src*='/stream/']")
+            val iframeSrc = iframe?.attr("abs:src")?.ifBlank { iframe.attr("src") }
+            val rawLink = if (!iframeSrc.isNullOrBlank()) {
+                iframeSrc
+            } else {
+                Regex("""['"](/r/[a-zA-Z0-9_\-]+)['"]""").find(pageHtml)?.groupValues?.get(1)
+                    ?: Regex("""['"](https?://[^'"]+/(?:stream|watch|dl|dash)/[^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
+            }
+
+            if (!rawLink.isNullOrBlank()) {
+                val resolved = resolveRedirect(rawLink) ?: rawLink
+                if (resolved.contains("/stream/") || resolved.contains("/watch/") || resolved.contains("/dash/") || resolved.contains("/dl/")) {
+                    val dlUrl = toDlUrl(resolved, ext)
+                    val streamUrl = toStreamUrl(resolved, ext)
+                    videos.add(Video(videoUrl = dlUrl, videoTitle = "$qualLabel · Direct DL", headers = vHeaders))
+                    videos.add(Video(videoUrl = streamUrl, videoTitle = "$qualLabel · Stream", headers = vHeaders))
+                }
+            }
         }
 
-        val streamUrl = resolveRedirect(ddl.streamLink)
-        if (streamUrl != null && streamUrl != watchUrl) {
-            Log.d(TAG, "getVideoList: stream URL → $streamUrl")
-            videos.add(Video(videoUrl = streamUrl, videoTitle = "$qualLabel · Stream"))
-        }
-
-        val dlUrl = resolveRedirect(ddl.downloadLink)
-        if (dlUrl != null) {
-            Log.d(TAG, "getVideoList: download URL → $dlUrl")
-            videos.add(Video(videoUrl = dlUrl, videoTitle = "$qualLabel · Direct DL"))
-        }
-
-        if (videos.isEmpty()) {
-            Log.w(TAG, "getVideoList: no videos from get_ddl, falling back")
-            return fallbackDirectUrl(episodeUrl, filename)
-        }
-
-        Log.d(TAG, "getVideoList: returning ${videos.size} videos")
+        Log.d(TAG, "extractAllVideos: returning ${videos.size} videos")
         return videos
     }
 
-    private fun fallbackDirectUrl(episodeUrl: String, filename: String): List<Video> {
-        val fullUrl = baseUrl + episodeUrl
-        val resLabel = Regex("""\[(\d+p)]""").find(filename)?.groupValues?.get(1) ?: prefQuality
-        val audioTag = Regex("""\[(Dual|Sub|Dub)]""", RegexOption.IGNORE_CASE)
-            .find(filename)?.groupValues?.get(1) ?: ""
-        val label = "AV1 · $resLabel${if (audioTag.isNotBlank()) " [$audioTag]" else ""} · Direct DL"
-        Log.d(TAG, "getVideoList: fallback URL → $fullUrl")
-        return listOf(Video(videoUrl = fullUrl, videoTitle = label))
+    private suspend fun resolveRedirect(path: String?, depth: Int = 0): String? {
+        if (path.isNullOrBlank() || depth > 3) return null
+        val target = if (path.startsWith("/")) "$baseUrl$path" else path
+        return try {
+            noRedirectClient.newCall(
+                GET(
+                    target,
+                    headers.newBuilder()
+                        .set("Referer", "$baseUrl/")
+                        .set("Sec-Fetch-Site", "same-origin")
+                        .build(),
+                ),
+            ).await().use { resp ->
+                val loc = resp.header("Location")
+                when {
+                    !loc.isNullOrBlank() -> {
+                        val nextUrl = if (loc.startsWith("/")) "$baseUrl$loc" else loc
+                        val cleanNext = sanitizeCdnDomain(nextUrl)
+                        if (cleanNext.contains("/r/")) resolveRedirect(cleanNext, depth + 1) else cleanNext
+                    }
+
+                    resp.isSuccessful -> sanitizeCdnDomain(resp.request.url.toString())
+
+                    else -> null
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "resolveRedirect failed for $path: ${e.message}")
+            null
+        }
+    }
+
+    private fun sanitizeCdnDomain(url: String): String = url.replace("animealpha.cc", "av1encodes.com")
+
+    private fun toStreamUrl(url: String, ext: String = ".mkv"): String {
+        val clean = sanitizeCdnDomain(url)
+            .replace("/watch/", "/stream/")
+            .replace("/dl/", "/stream/")
+            .replace("/dash/", "/stream/")
+            .substringBefore("/manifest.mpd")
+        return if (clean.contains("#")) clean else "$clean#$ext"
+    }
+
+    private fun toDlUrl(url: String, ext: String = ".mkv"): String {
+        val clean = sanitizeCdnDomain(url)
+            .replace("/watch/", "/dl/")
+            .replace("/stream/", "/dl/")
+            .replace("/dash/", "/dl/")
+            .substringBefore("/manifest.mpd")
+        return if (clean.contains("#")) clean else "$clean#$ext"
     }
 
     // ══════════════════════════════════════════════════════════════════════════
     // EXTRACTION HELPERS
     // ══════════════════════════════════════════════════════════════════════════
+    private val tokenRegexes by lazy {
+        listOf(
+            Regex("""['"]X-DDL-Token['"]\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
+            Regex("""['"](A{2,}[A-Za-z0-9_\-]{10,})['"]"""),
+            Regex("""data-token=['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
+            Regex("""(?:token|ddlToken)\s*=\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
+        )
+    }
+
+    private fun extractDdlToken(html: String): String? {
+        for (regex in tokenRegexes) {
+            val match = regex.find(html)?.groupValues?.get(1)
+            if (!match.isNullOrBlank()) return match
+        }
+        return null
+    }
+
+    private fun extractImgUrl(img: Element?): String? {
+        if (img == null) return null
+        return img.attr("abs:data-src").ifBlank { null }
+            ?: img.attr("abs:data-lazy-src").ifBlank { null }
+            ?: img.attr("abs:src").ifBlank { null }
+    }
+
     private val filenameRegex by lazy { Regex("""([a-zA-Z0-9_ \-\[\]().%]+?\.(?:mkv|mp4))""", RegexOption.IGNORE_CASE) }
 
     private fun extractFilenames(html: String): List<String> {
@@ -599,7 +858,8 @@ class AV1Encodes : Source() {
             val titlePart = epMatch.groupValues[2].trim()
             val audioTag = subdubRegex
                 .find(filename)?.groupValues?.get(1) ?: ""
-            "Season $season Ep $e - $titlePart${if (audioTag.isNotBlank()) " [$audioTag]" else ""}"
+            val audioSuffix = if (audioTag.isNotBlank()) " [$audioTag]" else ""
+            if (season != "1" && season.isNotBlank()) "Season $season Ep $e - $titlePart$audioSuffix" else "Ep $e - $titlePart$audioSuffix"
         } else {
             val cleanName = filename.replace(qualityRegex, "")
                 .substringBeforeLast(".").trim()
@@ -608,7 +868,15 @@ class AV1Encodes : Source() {
     }
 
     private val episodeSNumberRegex by lazy { Regex("""\[(?:S\d+-)?E(\d+)]""") }
-    private fun parseEpisodeNumber(filename: String): Float = episodeSNumberRegex.find(filename)?.groupValues?.get(1)?.toFloatOrNull() ?: 1f
+    private fun parseEpisodeNumber(filename: String, season: String = "1"): Float {
+        val epNum = episodeSNumberRegex.find(filename)?.groupValues?.get(1)?.toFloatOrNull() ?: 1f
+        val s = season.toIntOrNull() ?: 1
+        return if (s > 1) {
+            ((s - 1) * 100 + epNum)
+        } else {
+            epNum
+        }
+    }
 
     private val cleanTitleRegex1 by lazy { Regex("""\s*·\s*\d+\s*downloads?.*""", RegexOption.IGNORE_CASE) }
     private val cleanTitleRegex2 by lazy { Regex("""^\[[a-zA-Z0-9_\-]+]\s*""") }

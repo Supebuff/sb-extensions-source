@@ -1,0 +1,18 @@
+ext {
+    extName = 'WatchAnimeZ'
+    extClass = '.Watchanimez'
+    extVersionCode = 8
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"
+
+dependencies {
+    implementation(project(":lib:episode-metadata-fetcher"))
+    implementation(project(":lib:unpacker"))
+    implementation(project(":lib:playlist-utils"))
+    implementation(project(":lib:byse-extractor"))
+    implementation(project(":lib:filemoon-extractor"))
+    implementation(project(":lib:voe-extractor"))
+    implementation(project(":lib:vidmoly-extractor"))
+}

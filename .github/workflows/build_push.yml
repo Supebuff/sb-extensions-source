@@ -214,12 +214,14 @@ jobs:
           token: ${{ secrets.BOT_PAT }}
           ref: main
           path: repo
+          fetch-depth: 0
 
       - name: Merge repo
         env:
           DELETED_MODULES: ${{ needs.prepare.outputs.delete }}
         run: |
           cd repo
+          pip install --no-cache-dir protobuf
           python ../${{ github.ref_name }}/.github/scripts/merge-repo.py "$DELETED_MODULES" '${{ github.ref_name }}/repo'
 
       - name: Sync repo
@@ -230,12 +232,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin https://github.com/salmanbappi/extensions-repo.git
+          git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
           git fetch origin
           git reset origin/main
           git add -A
           git commit --amend -m "$COMMIT_MESSAGE" --no-sign --allow-empty || echo "No changes to commit"
-          git push origin HEAD:main --force
-          git push origin HEAD:repo --force
+          git push origin HEAD:main HEAD:repo --force
 
       - name: Purge cached index on jsDelivr
         run: |
@@ -243,9 +245,13 @@ jobs:
           curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/index.json || true
           curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/index.min.json || true
           curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/index.html || true
+          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/index.pb || true
+          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@main/repo.json || true
           curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/index.json || true
           curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/index.min.json || true
           curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/index.html || true
+          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/index.pb || true
+          curl -fsS --retry 3 https://purge.jsdelivr.net/gh/salmanbappi/extensions-repo@repo/repo.json || true
 
       - name: Create GitHub Release
         working-directory: ${{ github.ref_name }}

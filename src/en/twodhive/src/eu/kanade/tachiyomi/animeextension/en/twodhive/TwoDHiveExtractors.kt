@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.lib.okruextractor.OkruExtractor
 import eu.kanade.tachiyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import extensions.utils.UrlUtils
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import okhttp3.MediaType.Companion.toMediaType
@@ -18,21 +19,102 @@ class TwoDHiveExtractors(
     private val headers: Headers,
     private val json: Json,
     private val playlistUtils: PlaylistUtils,
+    private val proxy: TwoDHiveProxy,
 ) {
     private val okruExtractor by lazy { OkruExtractor(client) }
 
+    @Volatile
+    private var cachedCapToken: String? = null
+
+    @Volatile
+    private var cachedCapTokenExpiry: Long = 0L
+
     private inline fun <reified T> Response.parseAs(): T = json.decodeFromString(body.string())
     private inline fun <reified T> String.parseAs(): T = json.decodeFromString(this)
+
+    private fun streamHeaders(referer: String, origin: String? = null): Headers = headers.newBuilder().apply {
+        set("Referer", referer)
+        if (origin != null) set("Origin", origin)
+        set("User-Agent", headers["User-Agent"] ?: DEFAULT_USER_AGENT)
+    }.build()
+
+    // ======================== MegaPlay Resolver ========================
+    fun extractMegaPlay(malId: String, epNum: String, type: String): List<Video> {
+        val streamPageUrl = "https://megaplay.buzz/stream/mal/$malId/$epNum/$type"
+        val pageHeaders = headers.newBuilder()
+            .set("Referer", "https://2dhive.com/")
+            .set("User-Agent", headers["User-Agent"] ?: DEFAULT_USER_AGENT)
+            .build()
+
+        val pageHtml = runCatching {
+            client.newCall(GET(streamPageUrl, pageHeaders)).execute().use { it.body.string() }
+        }.getOrNull() ?: return emptyList()
+
+        val streamId = Regex("""data-id=["'](\d+)["']""").find(pageHtml)?.groupValues?.get(1)
+            ?: Regex("""<title>File (\d+)""").find(pageHtml)?.groupValues?.get(1)
+            ?: return emptyList()
+
+        val sourcesUrl = "https://megaplay.buzz/stream/getSources?id=$streamId&id=$streamId"
+        val sourcesHeaders = headers.newBuilder()
+            .set("Referer", streamPageUrl)
+            .add("X-Requested-With", "XMLHttpRequest")
+            .set("User-Agent", headers["User-Agent"] ?: DEFAULT_USER_AGENT)
+            .build()
+
+        val sourcesDto = runCatching {
+            client.newCall(GET(sourcesUrl, sourcesHeaders)).execute().use { resp ->
+                resp.parseAs<MegaPlaySourcesDto>()
+            }
+        }.getOrNull() ?: return emptyList()
+
+        val masterUrl = sourcesDto.sources?.file?.takeIf { it.isNotBlank() }
+            ?: sourcesDto.enc?.takeIf { it.isNotBlank() }?.let { enc ->
+                val decrypted = TwoDHiveCrypto.decryptMegaPlay(enc) ?: return@let null
+                runCatching { json.decodeFromString<MegaPlayFileDto>(decrypted).file }.getOrNull()
+            } ?: return emptyList()
+
+        val typeTag = type.replaceFirstChar { it.uppercase() }
+
+        val subtitleTracks = sourcesDto.tracks
+            ?.filter { it.kind == "captions" && !it.file.isNullOrBlank() }
+            ?.map { Track(it.file!!, it.label ?: "English") }
+            ?: emptyList()
+
+        val streamRefHeaders = streamHeaders("https://megaplay.buzz/", "https://megaplay.buzz")
+
+        val rawVideos = runCatching {
+            playlistUtils.extractFromHls(
+                playlistUrl = masterUrl,
+                referer = "https://megaplay.buzz/",
+                masterHeadersGen = { _, _ -> streamRefHeaders },
+                videoHeadersGen = { _, _, _ -> streamRefHeaders },
+                subtitleList = subtitleTracks,
+                videoNameGen = { quality -> "MegaPlay - $quality ($typeTag)" },
+            )
+        }.getOrElse {
+            listOf(
+                Video(
+                    videoUrl = masterUrl,
+                    videoTitle = "MegaPlay - Auto ($typeTag)",
+                    headers = streamRefHeaders,
+                    subtitleTracks = subtitleTracks,
+                ),
+            )
+        }
+
+        return rawVideos.map { proxy.processVideo(it, "https://megaplay.buzz/") }
+    }
 
     // ======================== BabaStream Resolver ========================
     fun extractBabaStream(malId: String, epNum: String, type: String): List<Video> {
         val embedUrl = "https://babastream.top/embed/$malId/$epNum/$type"
         val embedHeaders = headers.newBuilder()
             .set("Referer", "https://2dhive.com/")
+            .set("User-Agent", headers["User-Agent"] ?: DEFAULT_USER_AGENT)
             .build()
 
         val embedHtml = runCatching {
-            client.newCall(GET(embedUrl, embedHeaders)).execute().body.string()
+            client.newCall(GET(embedUrl, embedHeaders)).execute().use { it.body.string() }
         }.getOrNull() ?: return emptyList()
 
         val cfgJsonStr = Regex("""var\s+CFG\s*=\s*(\{.*?\});""").find(embedHtml)?.groupValues?.get(1)
@@ -44,63 +126,124 @@ class TwoDHiveExtractors(
         val pk = cfg.pk ?: return emptyList()
         val sid = cfg.sid ?: return emptyList()
 
-        val encryptedPayload = TwoDHiveCrypto.encryptAesGcm(pk, """{"ts":${System.currentTimeMillis()}}""")
-        val postBody = """{"s":"$sid","d":"$encryptedPayload"}"""
-            .toRequestBody("application/json".toMediaType())
+        fun postApi(path: String, payloadJson: String): String? {
+            val encData = TwoDHiveCrypto.encryptAesGcm(pk, payloadJson)
+            val postBody = """{"s":"$sid","d":"$encData"}"""
+                .toRequestBody("application/json".toMediaType())
+            val reqHeaders = headers.newBuilder()
+                .set("Referer", embedUrl)
+                .set("Origin", "https://babastream.top")
+                .set("User-Agent", headers["User-Agent"] ?: DEFAULT_USER_AGENT)
+                .build()
 
-        val resolveHeaders = headers.newBuilder()
-            .set("Referer", embedUrl)
-            .set("Origin", "https://babastream.top")
-            .build()
-
-        val resolveResp = runCatching {
-            client.newCall(POST("https://babastream.top/api/resolve", resolveHeaders, postBody)).execute()
-        }.getOrNull() ?: return emptyList()
-
-        val resolveDto = runCatching { resolveResp.parseAs<BabaResolveResponseDto>() }.getOrNull()
-            ?: return emptyList()
-
-        val decryptedJson = TwoDHiveCrypto.decryptAesGcm(pk, resolveDto.d ?: return emptyList())
-        val payload = runCatching { decryptedJson.parseAs<BabaDecryptedPayloadDto>() }.getOrNull()
-            ?: return emptyList()
-
-        val typeTag = type.replaceFirstChar { it.uppercase() }
-        val videos = mutableListOf<Video>()
-
-        when (payload.t) {
-            "direct" -> {
-                payload.u?.let { directUrl ->
-                    videos.add(
-                        Video(
-                            videoUrl = directUrl,
-                            videoTitle = "Direct MP4 ($typeTag)",
-                            headers = headers.newBuilder().set("Referer", embedUrl).build(),
-                        ),
-                    )
+            val (respD, isSuccess) = runCatching {
+                client.newCall(POST("https://babastream.top$path", reqHeaders, postBody)).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null to false
+                    val respDto = resp.parseAs<BabaResolveResponseDto>()
+                    respDto.d to true
                 }
-            }
+            }.getOrNull() ?: (null to false)
 
-            "embed" -> {
-                payload.u?.let { embedTarget ->
-                    if (embedTarget.contains("ok.ru")) {
-                        videos.addAll(
-                            okruExtractor.videosFromUrl(embedTarget, prefix = "OK.ru ($typeTag) - "),
+            if (!isSuccess || respD == null) return null
+            return TwoDHiveCrypto.decryptAesGcm(pk, respD)
+        }
+
+        var resolvedJson = postApi("/api/resolve", """{"ts":${System.currentTimeMillis()}}""")
+        var payload = runCatching { resolvedJson?.parseAs<BabaDecryptedPayloadDto>() }.getOrNull()
+
+        // Solve Cap challenge if server requires verification
+        if (payload?.t == "error" && payload?.m == "verify" && !cfg.cap.isNullOrBlank()) {
+            val redeemToken = getOrSolveCapToken(cfg.cap)
+            if (!redeemToken.isNullOrBlank()) {
+                val verifyJson = postApi(
+                    "/api/cap-verify",
+                    """{"ts":${System.currentTimeMillis()},"token":"$redeemToken","mode":"invisible"}""",
+                )
+                val verifyDto = runCatching { verifyJson?.parseAs<BabaVerifyResponseDto>() }.getOrNull()
+                if (verifyDto?.t == "ok") {
+                    resolvedJson = postApi("/api/resolve", """{"ts":${System.currentTimeMillis()}}""")
+                    payload = runCatching { resolvedJson?.parseAs<BabaDecryptedPayloadDto>() }.getOrNull()
+                } else {
+                    val freshToken = solveCap(cfg.cap)
+                    if (!freshToken.isNullOrBlank()) {
+                        val vJson2 = postApi(
+                            "/api/cap-verify",
+                            """{"ts":${System.currentTimeMillis()},"token":"$freshToken","mode":"invisible"}""",
                         )
+                        val vDto2 = runCatching { vJson2?.parseAs<BabaVerifyResponseDto>() }.getOrNull()
+                        if (vDto2?.t == "ok") {
+                            resolvedJson = postApi("/api/resolve", """{"ts":${System.currentTimeMillis()}}""")
+                            payload = runCatching { resolvedJson?.parseAs<BabaDecryptedPayloadDto>() }.getOrNull()
+                        }
                     }
                 }
             }
         }
 
-        // Secondary /api/vidara check
-        runCatching {
-            val vidaraResp = client.newCall(POST("https://babastream.top/api/vidara", resolveHeaders, postBody)).execute()
-            val vidaraDto = vidaraResp.parseAs<BabaResolveResponseDto>()
-            val decryptedVidara = TwoDHiveCrypto.decryptAesGcm(pk, vidaraDto.d ?: return@runCatching)
-            val vidaraPayload = decryptedVidara.parseAs<BabaDecryptedPayloadDto>()
-            if (vidaraPayload.t == "vidara" && !vidaraPayload.u.isNullOrBlank()) {
-                val vUrl = vidaraPayload.u!!
-                if (vUrl.contains("ok.ru")) {
-                    videos.addAll(okruExtractor.videosFromUrl(vUrl, prefix = "Vidara (OK.ru) ($typeTag) - "))
+        if (payload == null) return emptyList()
+
+        val typeTag = type.replaceFirstChar { it.uppercase() }
+        val streamHeaders = streamHeaders(embedUrl, "https://babastream.top")
+        val videos = mutableListOf<Video>()
+
+        val subtitleTracks = payload.tracks?.mapNotNull { track ->
+            val rawUrl = track.u?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val fullTrackUrl = UrlUtils.fixUrl(rawUrl, "https://babastream.top")
+            Track(fullTrackUrl, track.label ?: "English")
+        } ?: emptyList()
+
+        when (payload.t) {
+            "direct" -> {
+                payload.u?.takeIf { it.isNotBlank() }?.let { directUrl ->
+                    val fullDirectUrl = UrlUtils.fixUrl(directUrl, "https://babastream.top")
+                    val video = Video(
+                        videoUrl = fullDirectUrl,
+                        videoTitle = "BabaStream - Direct MP4 ($typeTag)",
+                        headers = streamHeaders,
+                        subtitleTracks = subtitleTracks,
+                    )
+                    val processed = if (fullDirectUrl.contains("fbcdn.net") || fullDirectUrl.contains("facebook.com")) {
+                        proxy.processDirectVideo(video, embedUrl)
+                    } else {
+                        video
+                    }
+                    videos.add(processed)
+                }
+            }
+
+            "hls" -> {
+                payload.u?.takeIf { it.isNotBlank() }?.let { hlsUrl ->
+                    val fullHlsUrl = UrlUtils.fixUrl(hlsUrl, "https://babastream.top")
+                    val rawVideos = runCatching {
+                        playlistUtils.extractFromHls(
+                            playlistUrl = fullHlsUrl,
+                            referer = embedUrl,
+                            masterHeadersGen = { _, _ -> streamHeaders },
+                            videoHeadersGen = { _, _, _ -> streamHeaders },
+                            subtitleList = subtitleTracks,
+                            videoNameGen = { quality -> "BabaStream - $quality ($typeTag)" },
+                        )
+                    }.getOrElse {
+                        listOf(
+                            Video(
+                                videoUrl = fullHlsUrl,
+                                videoTitle = "BabaStream - Auto ($typeTag)",
+                                headers = streamHeaders,
+                                subtitleTracks = subtitleTracks,
+                            ),
+                        )
+                    }
+                    videos.addAll(rawVideos)
+                }
+            }
+
+            "embed" -> {
+                payload.u?.takeIf { it.isNotBlank() }?.let { embedTarget ->
+                    if (embedTarget.contains("ok.ru")) {
+                        videos.addAll(
+                            okruExtractor.videosFromUrl(embedTarget, prefix = "BabaStream - OK.ru ($typeTag) - "),
+                        )
+                    }
                 }
             }
         }
@@ -108,52 +251,88 @@ class TwoDHiveExtractors(
         return videos
     }
 
-    // ======================== MegaPlay Resolver ========================
-    fun extractMegaPlay(malId: String, epNum: String, type: String): List<Video> {
-        val streamPageUrl = "https://megaplay.buzz/stream/mal/$malId/$epNum/$type"
-        val pageHeaders = headers.newBuilder()
-            .set("Referer", "https://2dhive.com/")
+    private fun getOrSolveCapToken(capEndpoint: String): String? {
+        val now = System.currentTimeMillis()
+        if (now < cachedCapTokenExpiry && !cachedCapToken.isNullOrBlank()) {
+            return cachedCapToken
+        }
+        return solveCap(capEndpoint)
+    }
+
+    private fun solveCap(capEndpoint: String): String? = runCatching {
+        val endpoint = if (capEndpoint.endsWith("/")) capEndpoint else "$capEndpoint/"
+        val chalHeaders = headers.newBuilder()
+            .set("Content-Type", "application/json")
+            .set("User-Agent", headers["User-Agent"] ?: DEFAULT_USER_AGENT)
             .build()
 
-        val pageHtml = runCatching {
-            client.newCall(GET(streamPageUrl, pageHeaders)).execute().body.string()
-        }.getOrNull() ?: return emptyList()
+        val chalDto = runCatching {
+            client.newCall(
+                POST(
+                    "${endpoint}challenge",
+                    chalHeaders,
+                    "{}".toRequestBody("application/json".toMediaType()),
+                ),
+            ).execute().use { it.parseAs<CapChallengeResponseDto>() }
+        }.getOrNull() ?: return null
 
-        val streamId = Regex("""<title>File (\d+)""").find(pageHtml)?.groupValues?.get(1)
-            ?: Regex("""data-id="(\d+)"""").find(pageHtml)?.groupValues?.get(1)
-            ?: return emptyList()
+        val token = chalDto.token ?: return null
+        val count = chalDto.challenge?.c ?: 80
+        val sLen = chalDto.challenge?.s ?: 32
+        val dLen = chalDto.challenge?.d ?: 4
 
-        val sourcesUrl = "https://megaplay.buzz/stream/getSources?id=$streamId&id=$streamId"
-        val sourcesHeaders = headers.newBuilder()
-            .set("Referer", streamPageUrl)
-            .add("X-Requested-With", "XMLHttpRequest")
-            .build()
+        val solutions = TwoDHiveCrypto.solveCapChallenges(token, count, sLen, dLen)
 
-        val sourcesResp = runCatching {
-            client.newCall(GET(sourcesUrl, sourcesHeaders)).execute()
-        }.getOrNull() ?: return emptyList()
-
-        val sourcesDto = runCatching { sourcesResp.parseAs<MegaPlaySourcesDto>() }.getOrNull()
-            ?: return emptyList()
-
-        val masterUrl = sourcesDto.sources?.file ?: return emptyList()
-        val typeTag = type.replaceFirstChar { it.uppercase() }
-
-        val subtitleTracks = sourcesDto.tracks
-            ?.filter { it.kind == "captions" && !it.file.isNullOrBlank() }
-            ?.map { Track(it.file!!, it.label ?: "English") }
-            ?: emptyList()
-
-        val streamRefHeaders = headers.newBuilder()
-            .set("Referer", "https://megaplay.buzz/")
-            .build()
-
-        return playlistUtils.extractFromHls(
-            playlistUrl = masterUrl,
-            masterHeaders = streamRefHeaders,
-            videoHeaders = streamRefHeaders,
-            subtitleList = subtitleTracks,
-            videoNameGen = { quality -> "$quality ($typeTag)" },
+        val redeemPayload = json.encodeToString(
+            CapRedeemRequestDto.serializer(),
+            CapRedeemRequestDto(token = token, solutions = solutions),
         )
+
+        val redeemDto = runCatching {
+            client.newCall(
+                POST(
+                    "${endpoint}redeem",
+                    chalHeaders,
+                    redeemPayload.toRequestBody("application/json".toMediaType()),
+                ),
+            ).execute().use { it.parseAs<CapRedeemResponseDto>() }
+        }.getOrNull() ?: return null
+
+        redeemDto.token?.also {
+            cachedCapToken = it
+            cachedCapTokenExpiry = redeemDto.expires ?: (System.currentTimeMillis() + 3600_000L)
+        }
+    }.getOrNull()
+
+    // ======================== Wavy Resolver ========================
+    fun extractWavy(malId: String, epNum: String, type: String): List<Video> {
+        val embedUrl = "https://wavy.babastream.top/$malId/$epNum/$type"
+        val embedHeaders = headers.newBuilder()
+            .set("Referer", "https://2dhive.com/")
+            .set("User-Agent", headers["User-Agent"] ?: DEFAULT_USER_AGENT)
+            .build()
+
+        val embedOk = runCatching {
+            client.newCall(GET(embedUrl, embedHeaders)).execute().use { it.isSuccessful }
+        }.getOrDefault(false)
+
+        if (!embedOk) return emptyList()
+
+        val typeTag = type.replaceFirstChar { it.uppercase() }
+        val streamHeaders = streamHeaders(embedUrl, "https://wavy.babastream.top")
+        val streamUrl = "https://wavy.babastream.top/stream.m3u8"
+
+        val video = Video(
+            videoUrl = streamUrl,
+            videoTitle = "Wavy - 720p ($typeTag)",
+            headers = streamHeaders,
+        )
+
+        return listOf(proxy.processVideo(video, embedUrl))
+    }
+
+    companion object {
+        private const val DEFAULT_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     }
 }

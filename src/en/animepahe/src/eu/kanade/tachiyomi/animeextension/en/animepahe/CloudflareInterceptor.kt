@@ -37,6 +37,7 @@ class CloudflareInterceptor(
             }
 
             if (bypassResult != null) {
+                response.close()
                 return chain.proceed(
                     originalRequest.newBuilder()
                         .header("Cookie", bypassResult.cookies)

@@ -48,7 +48,7 @@ class Oneshows :
 
     override val name = "1Shows"
 
-    override val baseUrl = "https://www.1shows.org"
+    override val baseUrl = "https://www.1shows.bz"
 
     override val lang = "en"
 
@@ -61,12 +61,13 @@ class Oneshows :
     }
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .add("Referer", "$baseUrl/")
         .add("Accept", "application/json, text/plain, */*")
 
-    private val universalExtractor by lazy { UniversalExtractor(client) }
-    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
-    private val m3u8Integration by lazy { M3u8Integration(client) }
+    private val universalExtractor by lazy { UniversalExtractor(network.client) }
+    private val playlistUtils by lazy { PlaylistUtils(network.client, headers) }
+    private val m3u8Integration by lazy { M3u8Integration(network.client) }
 
     // ============================== Popular ===============================
     override suspend fun getPopularAnime(page: Int): AnimesPage {
@@ -262,6 +263,13 @@ class Oneshows :
         return episodeList.distinctBy { it.url }.reversed()
     }
 
+    override val migration: SharedPreferences.() -> Unit = {
+        val currentHoster = getString(PREF_HOSTER_KEY, null)
+        if (currentHoster == null || currentHoster == "Vidzee") {
+            edit().putString(PREF_HOSTER_KEY, PREF_HOSTER_DEFAULT).apply()
+        }
+    }
+
     // ============================ Video Links =============================
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val isMovie = episode.url.contains("movie")
@@ -274,54 +282,92 @@ class Oneshows :
         val parsedUri = Uri.parse("https://dummy.com${episode.url}")
         val season = parsedUri.getQueryParameter("season") ?: "1"
         val ep = parsedUri.getQueryParameter("episode") ?: "1"
+        val path = if (isMovie) "movie/$id" else "tv/$id/$season/$ep"
 
-        val defaultHosters = if (isMovie) {
-            listOf(
-                Hoster(hosterName = "Vidzee (Direct HLS)", hosterUrl = "https://player.vidzee.wtf/embed/movie/$id"),
-                Hoster(hosterName = "Vidrock (Multi-Server)", hosterUrl = "https://vidrock.ru/movie/$id"),
-                Hoster(hosterName = "VidFast", hosterUrl = "https://vidfast.pro/movie/$id"),
-                Hoster(hosterName = "VidLink", hosterUrl = "https://vidlink.pro/movie/$id"),
-                Hoster(hosterName = "Main 1 (Viduki)", hosterUrl = "https://www.viduki.net/1/movie/$id"),
-                Hoster(hosterName = "Main 2 (Vidy)", hosterUrl = "https://vidy.st/movie/$id"),
-                Hoster(hosterName = "Multi-Language (Viduki)", hosterUrl = "https://www.viduki.net/2/movie/$id"),
-                Hoster(hosterName = "Premium Embeds (Viduki)", hosterUrl = "https://www.viduki.net/4/movie/$id"),
-            )
-        } else {
-            listOf(
-                Hoster(hosterName = "Vidzee (Direct HLS)", hosterUrl = "https://player.vidzee.wtf/embed/tv/$id/$season/$ep"),
-                Hoster(hosterName = "Vidrock (Multi-Server)", hosterUrl = "https://vidrock.ru/tv/$id/$season/$ep"),
-                Hoster(hosterName = "VidFast", hosterUrl = "https://vidfast.pro/tv/$id/$season/$ep"),
-                Hoster(hosterName = "VidLink", hosterUrl = "https://vidlink.pro/tv/$id/$season/$ep"),
-                Hoster(hosterName = "Main 1 (Viduki)", hosterUrl = "https://www.viduki.net/1/tv/$id/$season/$ep"),
-                Hoster(hosterName = "Main 2 (Vidy)", hosterUrl = "https://vidy.st/tv/$id/$season/$ep"),
-                Hoster(hosterName = "Multi-Language (Viduki)", hosterUrl = "https://www.viduki.net/2/tv/$id/$season/$ep"),
-                Hoster(hosterName = "Premium Embeds (Viduki)", hosterUrl = "https://www.viduki.net/4/tv/$id/$season/$ep"),
-            )
-        }
+        val hosters = mutableListOf<Hoster>()
 
-        return try {
-            val req = GET("https://api.viduki.net/embed_providers?site=1shows", headers)
-            val res = client.newCall(req).execute()
+        // 1. Direct Vidrock Sub-Servers (Nova, Atlas, Astra, Orion, etc.)
+        val vidrockHeaders = Headers.Builder()
+            .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .add("Referer", "https://vidrock.to/")
+            .add("Origin", "https://vidrock.to")
+            .build()
+
+        try {
+            val apiRes = network.client.newCall(GET("https://vidrock.to/api/$path", vidrockHeaders)).execute()
+            val serverMap = apiRes.parseAs<Map<String, VidrockServerDto?>>(json)
+            serverMap.forEach { (serverName, dto) ->
+                if (dto != null && !dto.url.isNullOrBlank()) {
+                    val lang = dto.language ?: ""
+                    val langSuffix = if (lang.isNotBlank() && !lang.equals("English", true)) " [$lang]" else ""
+                    val label = when (serverName) {
+                        "Nova" -> "Vidrock (Nova)"
+                        "Atlas" -> "Vidrock (Atlas - Multi-Quality)"
+                        "Astra" -> "Vidrock (Astra - Direct MP4)"
+                        "Orion" -> "Vidrock (Orion)"
+                        "Luna" -> "Vidrock (Luna)"
+                        "Lyra" -> "Vidrock (Lyra)"
+                        "Vega" -> "Vidrock (Vega)"
+                        else -> "Vidrock ($serverName$langSuffix)"
+                    }
+                    hosters.add(Hoster(hosterName = label, hosterUrl = "vidrock:$serverName:$path"))
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 2. Direct MoviesAPI (VidSpark/NetroCDN - 1080p HLS)
+        hosters.add(Hoster(hosterName = "MoviesAPI (Direct HLS)", hosterUrl = "moviesapi:$path"))
+
+        // 3. 1shows Embedded Site Providers
+        try {
+            val providerHeaders = Headers.Builder()
+                .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .add("Referer", "https://www.1shows.bz/")
+                .add("Origin", "https://www.1shows.bz")
+                .add("Accept", "application/json, text/plain, */*")
+                .build()
+            val req = GET("https://api.viduki.net/embed_providers?site=1shows", providerHeaders)
+            val res = network.client.newCall(req).execute()
             val dto = res.parseAs<EmbedProvidersResponseDto>(json)
-            val dynamicList = dto.providers?.mapNotNull { p ->
+            dto.providers?.forEach { p ->
                 val template = if (isMovie) p.movie else p.tv
                 val targetUrl = template
                     ?.replace("{id}", id)
                     ?.replace("{s}", season)
                     ?.replace("{e}", ep)
-                    ?: return@mapNotNull null
-                val label = p.label ?: p.id ?: "Server"
-                Hoster(hosterName = label, hosterUrl = targetUrl)
-            } ?: emptyList()
-            if (dynamicList.isNotEmpty()) {
-                val combined = (dynamicList + defaultHosters).distinctBy { it.hosterUrl }
-                orderHostersByPref(combined)
-            } else {
-                orderHostersByPref(defaultHosters)
+                    ?: return@forEach
+                val baseLabel = p.label ?: p.id ?: "Server"
+                val serviceTag = when {
+                    targetUrl.contains("vidrock", ignoreCase = true) -> "Vidrock"
+                    targetUrl.contains("vidfast", ignoreCase = true) -> "VidFast"
+                    targetUrl.contains("vidlink", ignoreCase = true) -> "VidLink"
+                    targetUrl.contains("vidy.st", ignoreCase = true) -> "Vidy"
+                    targetUrl.contains("viduki.net", ignoreCase = true) -> "Viduki"
+                    targetUrl.contains("vidzee", ignoreCase = true) -> "Vidzee"
+                    else -> ""
+                }
+                if (serviceTag != "Vidrock" && serviceTag != "Vidzee") {
+                    val label = if (serviceTag.isNotEmpty() && !baseLabel.contains(serviceTag, ignoreCase = true)) {
+                        "$baseLabel ($serviceTag)"
+                    } else {
+                        baseLabel
+                    }
+                    hosters.add(Hoster(hosterName = label, hosterUrl = targetUrl))
+                }
             }
-        } catch (_: Exception) {
-            orderHostersByPref(defaultHosters)
+        } catch (_: Exception) {}
+
+        // Fallbacks if discovery was empty
+        if (hosters.isEmpty()) {
+            hosters.add(Hoster(hosterName = "Vidrock (Nova)", hosterUrl = "vidrock:Nova:$path"))
+            hosters.add(Hoster(hosterName = "Vidrock (Atlas)", hosterUrl = "vidrock:Atlas:$path"))
+            hosters.add(Hoster(hosterName = "MoviesAPI (Direct HLS)", hosterUrl = "moviesapi:$path"))
+            hosters.add(Hoster(hosterName = "Main 3 (VidFast)", hosterUrl = "https://vidfast.vc/$path"))
+            hosters.add(Hoster(hosterName = "Main 4 (VidLink)", hosterUrl = "https://vidlink.pro/$path"))
+            hosters.add(Hoster(hosterName = "Main 1 (Viduki)", hosterUrl = "https://www.viduki.net/1/$path"))
         }
+
+        return orderHostersByPref(hosters.distinctBy { it.hosterUrl })
     }
 
     private fun orderHostersByPref(hosters: List<Hoster>): List<Hoster> {
@@ -330,280 +376,261 @@ class Oneshows :
     }
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        val url = hoster.hosterUrl
-        val name = hoster.hosterName
-
-        return when {
-            url.contains("vidzee", ignoreCase = true) || name.contains("Vidzee", ignoreCase = true) -> {
-                extractVidzeeVideos(hoster)
-            }
-
-            url.contains("vidrock", ignoreCase = true) || name.contains("Vidrock", ignoreCase = true) -> {
-                extractVidrockVideos(hoster)
-            }
-
-            url.contains("vidfast", ignoreCase = true) || name.contains("VidFast", ignoreCase = true) -> {
-                extractVidfastVideos(hoster)
-            }
-
-            else -> {
-                extractGenericVideos(hoster)
-            }
-        }
-    }
-
-    // ============================ Provider: Vidzee =========================
-    private suspend fun extractVidzeeVideos(hoster: Hoster): List<Video> = coroutineScope {
-        val embedUrl = hoster.hosterUrl
-        val isMovie = embedUrl.contains("movie")
-        val id = if (isMovie) {
-            embedUrl.substringAfter("/movie/").substringBefore("?").substringBefore("/")
-        } else {
-            embedUrl.substringAfter("/tv/").substringBefore("?").substringBefore("/")
-        }
-
-        val season = if (!isMovie) {
-            val parts = embedUrl.substringAfter("/tv/").substringBefore("?").split("/")
-            if (parts.size >= 2) parts[1] else "1"
-        } else {
-            "1"
-        }
-
-        val ep = if (!isMovie) {
-            val parts = embedUrl.substringAfter("/tv/").substringBefore("?").split("/")
-            if (parts.size >= 3) parts[2] else "1"
-        } else {
-            "1"
-        }
-
-        val path = if (isMovie) "movie/$id" else "tv/$id/$season/$ep"
-        val vidzeeHeaders = Headers.Builder()
-            .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .add("Referer", "https://player.vidzee.wtf/")
-            .add("Origin", "https://player.vidzee.wtf")
-            .build()
-
+        val rawUrl = hoster.hosterUrl
         val subTracks = mutableListOf<Track>()
-        try {
-            val subReq = GET("https://core.vidzee.wtf/subs/$path", vidzeeHeaders)
-            val subRes = client.newCall(subReq).execute()
-            val subList = subRes.parseAs<List<SubtitleDto>>(json)
-            subList.forEach { sub ->
-                val subUrl = sub.file ?: sub.url
-                val subLabel = sub.label ?: sub.display ?: sub.language ?: "Subtitle"
-                if (!subUrl.isNullOrBlank()) {
-                    subTracks.add(Track(subUrl, subLabel))
-                }
-            }
-        } catch (_: Exception) {}
 
-        val servers = listOf(
-            Pair("ipcloud", "IPcloud"),
-            Pair("v6:Hindi", "Hindi v3"),
-            Pair("dcloud", "Dcloud"),
-            Pair("tik", "TCloud"),
-        )
+        val path = when {
+            rawUrl.startsWith("vidrock:") -> rawUrl.substringAfter(":").substringAfter(":")
+            rawUrl.startsWith("moviesapi:") -> rawUrl.removePrefix("moviesapi:")
+            rawUrl.contains("/movie/") -> "movie/" + rawUrl.substringAfter("/movie/").substringBefore("?")
+            rawUrl.contains("/tv/") -> "tv/" + rawUrl.substringAfter("/tv/").substringBefore("?")
+            else -> ""
+        }
 
-        val videos = servers.map { (serverId, serverLabel) ->
-            async {
-                try {
-                    val streamReq = GET("https://core.vidzee.wtf/streams/$path?s=$serverId&e=1", vidzeeHeaders)
-                    val streamRes = client.newCall(streamReq).execute()
-                    if (!streamRes.isSuccessful) return@async emptyList<Video>()
-                    val payload = streamRes.parseAs<VidzeePayloadDto>(json)
-                    val rawEncrypted = payload.c ?: return@async emptyList<Video>()
-                    val ct = Base64.decode(rawEncrypted, Base64.DEFAULT)
-                    val decryptedBytes = rc4Drop2048(VIDZEE_RC4_KEY, ct)
-                    val streamDto = json.decodeFromString<VidzeeStreamDto>(String(decryptedBytes, Charsets.UTF_8))
-                    val streamUrl = streamDto.url ?: return@async emptyList<Video>()
-                    val streamLang = streamDto.language ?: ""
-                    val langSuffix = if (streamLang.isNotBlank() && streamLang != "Auto") " [$streamLang]" else ""
-                    val prefix = "Vidzee ($serverLabel$langSuffix) - "
+        val isMovie = path.startsWith("movie")
+        val id = when {
+            path.startsWith("movie/") -> path.substringAfter("movie/").substringBefore("/")
+            path.startsWith("tv/") -> path.substringAfter("tv/").substringBefore("/")
+            else -> ""
+        }
+        val season = if (!isMovie && path.startsWith("tv/")) {
+            path.split("/").getOrNull(1) ?: "1"
+        } else {
+            "1"
+        }
+        val ep = if (!isMovie && path.startsWith("tv/")) {
+            path.split("/").getOrNull(2) ?: "1"
+        } else {
+            "1"
+        }
+        val subPath = if (isMovie) "movie/$id" else "tv/$id/$season/$ep"
 
-                    if (streamUrl.contains(".m3u8", ignoreCase = true)) {
-                        playlistUtils.extractFromHls(
-                            playlistUrl = streamUrl,
-                            referer = "https://player.vidzee.wtf/",
-                            masterHeaders = vidzeeHeaders,
-                            videoHeaders = vidzeeHeaders,
-                            videoNameGen = { q -> "$prefix$q" },
-                            subtitleList = subTracks,
-                        )
-                    } else {
-                        listOf(
-                            Video(
-                                videoUrl = streamUrl,
-                                videoTitle = "Vidzee ($serverLabel$langSuffix)",
-                                headers = vidzeeHeaders,
-                                subtitleTracks = subTracks,
-                            ),
-                        )
+        // Multi-source Subtitle Resolution
+        if (id.isNotBlank()) {
+            val subHeaders = Headers.Builder()
+                .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .add("Referer", "https://vidrock.to/")
+                .build()
+
+            // 1. SubVdrk
+            try {
+                val subReq = GET("https://sub.vdrk.site/v2/$subPath", subHeaders)
+                val subRes = network.client.newCall(subReq).execute()
+                val subList = subRes.parseAs<List<SubtitleDto>>(json)
+                subList.forEach { sub ->
+                    val subUrl = sub.file ?: sub.url
+                    val subLabel = sub.display ?: sub.label ?: sub.language ?: "Subtitle"
+                    if (!subUrl.isNullOrBlank()) {
+                        subTracks.add(Track(subUrl, subLabel))
                     }
-                } catch (_: Exception) {
-                    emptyList<Video>()
                 }
-            }
-        }.awaitAll().flatten()
+            } catch (_: Exception) {}
 
-        m3u8Integration.processVideoList(videos).sort()
+            // 2. Wyzie
+            try {
+                val wyzieUrl = if (isMovie) {
+                    "https://vidfast.vc/wyzie?id=$id"
+                } else {
+                    "https://vidfast.vc/wyzie?id=$id&season=$season&episode=$ep"
+                }
+                val wyzieHeaders = Headers.Builder()
+                    .add("User-Agent", "Mozilla/5.0")
+                    .add("Referer", "https://vidfast.vc/")
+                    .build()
+                val subReq = GET(wyzieUrl, wyzieHeaders)
+                val subRes = network.client.newCall(subReq).execute()
+                val subList = subRes.parseAs<List<SubtitleDto>>(json)
+                subList.forEach { sub ->
+                    val subUrl = sub.url ?: sub.file
+                    val subLabel = sub.display ?: sub.label ?: sub.language ?: "Subtitle"
+                    if (!subUrl.isNullOrBlank()) {
+                        subTracks.add(Track(subUrl, subLabel))
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        val videoList = mutableListOf<Video>()
+
+        when {
+            // Specific Vidrock Server
+            rawUrl.startsWith("vidrock:") -> {
+                val parts = rawUrl.removePrefix("vidrock:").split(":", limit = 2)
+                val targetServer = parts.getOrNull(0) ?: "Nova"
+                val vPath = parts.getOrNull(1) ?: ""
+                videoList.addAll(extractSingleVidrock(targetServer, vPath, subTracks))
+            }
+
+            // MoviesAPI
+            rawUrl.startsWith("moviesapi:") -> {
+                val vPath = rawUrl.removePrefix("moviesapi:")
+                videoList.addAll(extractMoviesApi(vPath, subTracks))
+            }
+
+            // VidFast
+            rawUrl.contains("vidfast", ignoreCase = true) -> {
+                videoList.addAll(extractVidfastVideos(hoster, subTracks))
+            }
+
+            // Generic fallback (VidLink, Viduki, Vidy)
+            else -> {
+                videoList.addAll(extractGenericVideos(hoster, subTracks))
+            }
+        }
+
+        val distinctSubs = subTracks.distinctBy { it.url }
+        val finalVideos = videoList.map { v ->
+            Video(
+                videoUrl = v.videoUrl,
+                videoTitle = v.videoTitle,
+                headers = v.headers,
+                audioTracks = v.audioTracks,
+                subtitleTracks = (v.subtitleTracks.orEmpty() + distinctSubs).distinctBy { it.url },
+            )
+        }
+
+        return m3u8Integration.processVideoList(finalVideos).sort()
     }
 
     // ============================ Provider: Vidrock ========================
-    private suspend fun extractVidrockVideos(hoster: Hoster): List<Video> = coroutineScope {
-        val embedUrl = hoster.hosterUrl
-        val isMovie = embedUrl.contains("movie")
-        val id = if (isMovie) {
-            embedUrl.substringAfter("/movie/").substringBefore("?").substringBefore("/")
-        } else {
-            embedUrl.substringAfter("/tv/").substringBefore("?").substringBefore("/")
-        }
-
-        val season = if (!isMovie) {
-            val parts = embedUrl.substringAfter("/tv/").substringBefore("?").split("/")
-            if (parts.size >= 2) parts[1] else "1"
-        } else {
-            "1"
-        }
-
-        val ep = if (!isMovie) {
-            val parts = embedUrl.substringAfter("/tv/").substringBefore("?").split("/")
-            if (parts.size >= 3) parts[2] else "1"
-        } else {
-            "1"
-        }
-
-        val path = if (isMovie) "movie/$id" else "tv/$id/$season/$ep"
+    private suspend fun extractSingleVidrock(serverName: String, vPath: String, subTracks: List<Track>): List<Video> {
         val vidrockHeaders = Headers.Builder()
-            .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .add("Referer", "https://vidrock.ru/")
-            .add("Origin", "https://vidrock.ru")
+            .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .add("Referer", "https://vidrock.to/")
+            .add("Origin", "https://vidrock.to")
             .build()
 
-        val subTracks = mutableListOf<Track>()
-        try {
-            val subReq = GET("https://sub.vdrk.site/v2/$path", vidrockHeaders)
-            val subRes = client.newCall(subReq).execute()
-            val subList = subRes.parseAs<List<SubtitleDto>>(json)
-            subList.forEach { sub ->
-                val subUrl = sub.file ?: sub.url
-                val subLabel = sub.label ?: sub.display ?: sub.language ?: "Subtitle"
-                if (!subUrl.isNullOrBlank()) {
-                    subTracks.add(Track(subUrl, subLabel))
+        val hosts = listOf("vidrock.to", "vidrock.ru")
+        var serverMap: Map<String, VidrockServerDto?> = emptyMap()
+        for (h in hosts) {
+            try {
+                val apiReq = GET("https://$h/api/$vPath", vidrockHeaders.newBuilder().set("Referer", "https://$h/").set("Origin", "https://$h").build())
+                val apiRes = network.client.newCall(apiReq).execute()
+                if (apiRes.isSuccessful) {
+                    val map = apiRes.parseAs<Map<String, VidrockServerDto?>>(json)
+                    if (map.values.any { it?.url?.isNotBlank() == true }) {
+                        serverMap = map
+                        break
+                    }
                 }
-            }
-        } catch (_: Exception) {}
-
-        val serverMap: Map<String, VidrockServerDto?> = try {
-            val apiReq = GET("https://vidrock.ru/api/$path", vidrockHeaders)
-            val apiRes = client.newCall(apiReq).execute()
-            apiRes.parseAs<Map<String, VidrockServerDto?>>(json)
-        } catch (_: Exception) {
-            emptyMap()
+            } catch (_: Exception) {}
         }
 
-        val videos: List<Video> = serverMap.entries.mapNotNull { (serverName, serverDto) ->
-            if (serverDto == null || serverDto.url.isNullOrBlank()) return@mapNotNull null
-            async {
-                try {
-                    val streamUrl = decryptVidrock(serverDto.url)
-                    if (streamUrl.isBlank()) return@async emptyList<Video>()
-                    val lang = serverDto.language ?: ""
-                    val langSuffix = if (lang.isNotBlank() && !lang.equals("English", true)) " [$lang]" else ""
-                    val prefix = "Vidrock ($serverName$langSuffix) - "
+        val serverDto = serverMap[serverName] ?: serverMap.values.firstOrNull { it?.url?.isNotBlank() == true } ?: return emptyList()
+        val encUrl = serverDto.url ?: return emptyList()
+        val streamUrl = decryptVidrock(encUrl)
+        if (streamUrl.isBlank()) return emptyList()
 
-                    if (streamUrl.contains(".m3u8", ignoreCase = true)) {
-                        playlistUtils.extractFromHls(
-                            playlistUrl = streamUrl,
-                            referer = "https://vidrock.ru/",
-                            masterHeaders = vidrockHeaders,
-                            videoHeaders = vidrockHeaders,
-                            videoNameGen = { q -> "$prefix$q" },
-                            subtitleList = subTracks,
-                        )
+        val lang = serverDto.language ?: ""
+        val langSuffix = if (lang.isNotBlank() && !lang.equals("English", true)) " [$lang]" else ""
+        val prefix = "$serverName$langSuffix - "
+
+        return try {
+            when {
+                serverName.equals("Astra", ignoreCase = true) -> {
+                    val astraRes = network.client.newCall(GET(streamUrl, vidrockHeaders)).execute()
+                    val astraItems = astraRes.parseAs<List<AstraItemDto>>(json)
+                    astraItems.mapNotNull { item ->
+                        if (!item.url.isNullOrBlank()) {
+                            val res = item.resolution ?: 720
+                            Video(
+                                videoUrl = item.url,
+                                videoTitle = "$prefix${res}p (MP4)",
+                                headers = vidrockHeaders,
+                                subtitleTracks = subTracks,
+                            )
+                        } else {
+                            null
+                        }
+                    }
+                }
+
+                streamUrl.contains(".m3u8", ignoreCase = true) -> {
+                    val extracted = playlistUtils.extractFromHls(
+                        playlistUrl = streamUrl,
+                        referer = "https://vidrock.to/",
+                        masterHeaders = vidrockHeaders,
+                        videoHeaders = vidrockHeaders,
+                        videoNameGen = { q -> "$prefix$q" },
+                        subtitleList = subTracks,
+                    )
+                    if (extracted.isNotEmpty()) {
+                        extracted
                     } else {
                         listOf(
                             Video(
                                 videoUrl = streamUrl,
-                                videoTitle = "Vidrock ($serverName$langSuffix)",
+                                videoTitle = "$prefix Direct Stream",
                                 headers = vidrockHeaders,
                                 subtitleTracks = subTracks,
                             ),
                         )
                     }
-                } catch (_: Exception) {
-                    emptyList<Video>()
+                }
+
+                else -> {
+                    listOf(
+                        Video(
+                            videoUrl = streamUrl,
+                            videoTitle = "$prefix Direct Stream",
+                            headers = vidrockHeaders,
+                            subtitleTracks = subTracks,
+                        ),
+                    )
                 }
             }
-        }.awaitAll().flatten()
-
-        m3u8Integration.processVideoList(videos).sort()
-    }
-
-    // ============================ Provider: VidFast ========================
-    private suspend fun extractVidfastVideos(hoster: Hoster): List<Video> {
-        val embedUrl = hoster.hosterUrl
-        val embedUri = Uri.parse(embedUrl)
-        val embedHost = embedUri.host ?: "vidfast.pro"
-        val isMovie = embedUrl.contains("movie")
-        val id = if (isMovie) {
-            embedUrl.substringAfter("/movie/").substringBefore("?").substringBefore("/")
-        } else {
-            embedUrl.substringAfter("/tv/").substringBefore("?").substringBefore("/")
-        }
-        val season = embedUri.pathSegments.getOrNull(2) ?: "1"
-        val ep = embedUri.pathSegments.getOrNull(3) ?: "1"
-
-        val embedHeaders = Headers.Builder()
-            .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .add("Referer", embedUrl)
-            .add("Origin", "https://$embedHost")
-            .build()
-
-        val subTracks = mutableListOf<Track>()
-        try {
-            val wyzieUrl = if (isMovie) {
-                "https://vidfast.pro/wyzie?id=$id"
-            } else {
-                "https://vidfast.pro/wyzie?id=$id&season=$season&episode=$ep"
-            }
-            val subReq = GET(wyzieUrl, embedHeaders)
-            val subRes = client.newCall(subReq).execute()
-            val subList = subRes.parseAs<List<SubtitleDto>>(json)
-            subList.forEach { sub ->
-                val subUrl = sub.url ?: sub.file
-                val subLabel = sub.display ?: sub.label ?: sub.language ?: "Subtitle"
-                if (!subUrl.isNullOrBlank()) {
-                    subTracks.add(Track(subUrl, subLabel))
-                }
-            }
-        } catch (_: Exception) {}
-
-        return try {
-            val videos = universalExtractor.videosFromUrl(embedUrl, embedHeaders, prefix = hoster.hosterName)
-            val mappedVideos = videos.map { v ->
-                Video(
-                    videoUrl = v.videoUrl,
-                    videoTitle = v.videoTitle,
-                    headers = embedHeaders,
-                    audioTracks = v.audioTracks,
-                    subtitleTracks = (v.subtitleTracks + subTracks).distinctBy { it.url },
-                )
-            }
-            m3u8Integration.processVideoList(mappedVideos).sort()
         } catch (_: Exception) {
             emptyList()
         }
     }
 
-    // ============================ Generic Extractor ========================
-    private suspend fun extractGenericVideos(hoster: Hoster): List<Video> {
-        val embedUrl = hoster.hosterUrl
+    // ============================ Provider: MoviesAPI ========================
+    private suspend fun extractMoviesApi(vPath: String, subTracks: List<Track>): List<Video> {
+        val apiHeaders = Headers.Builder()
+            .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .add("Referer", "https://moviesapi.to/")
+            .add("Origin", "https://moviesapi.to")
+            .add("x-player-key", "3a67e8866ae1d2bb9e81fe7f73315a56eb3bdf5e3e755c7554c8be6910aa6b13")
+            .build()
+
+        return try {
+            val req = GET("https://moviesapi.to/api/vidora/v1/$vPath", apiHeaders)
+            val res = network.client.newCall(req).execute()
+            if (!res.isSuccessful) return emptyList()
+            val dto = res.parseAs<VidoraResponseDto>(json)
+            val streamUrl = dto.sources?.firstOrNull()?.url ?: return emptyList()
+
+            val streamHeaders = Headers.Builder()
+                .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .add("Referer", "https://moviesapi.to/")
+                .build()
+
+            playlistUtils.extractFromHls(
+                playlistUrl = streamUrl,
+                referer = "https://moviesapi.to/",
+                masterHeaders = streamHeaders,
+                videoHeaders = streamHeaders,
+                videoNameGen = { q -> "MoviesAPI - $q" },
+                subtitleList = subTracks,
+            )
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    // ============================ Provider: VidFast ========================
+    private suspend fun extractVidfastVideos(hoster: Hoster, subTracks: List<Track>): List<Video> {
+        var embedUrl = hoster.hosterUrl
+        if (embedUrl.contains("vidfast.pro")) {
+            embedUrl = embedUrl.replace("vidfast.pro", "vidfast.vc")
+        }
         val embedUri = Uri.parse(embedUrl)
-        val embedHost = embedUri.host ?: "1shows.org"
+        val embedHost = embedUri.host ?: "vidfast.vc"
+
         val embedHeaders = Headers.Builder()
             .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .add("Referer", embedUrl)
-            .add("Origin", "https://$embedHost")
+            .add("Referer", "https://www.1shows.bz/")
+            .add("Origin", "https://www.1shows.bz")
             .build()
 
         val videoHeaders = Headers.Builder()
@@ -614,16 +641,52 @@ class Oneshows :
 
         return try {
             val videos = universalExtractor.videosFromUrl(embedUrl, embedHeaders, prefix = hoster.hosterName)
-            val mappedVideos = videos.map { v ->
+            videos.map { v ->
                 Video(
                     videoUrl = v.videoUrl,
                     videoTitle = v.videoTitle,
                     headers = videoHeaders,
                     audioTracks = v.audioTracks,
-                    subtitleTracks = v.subtitleTracks,
+                    subtitleTracks = (v.subtitleTracks.orEmpty() + subTracks).distinctBy { it.url },
                 )
             }
-            m3u8Integration.processVideoList(mappedVideos).sort()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    // ============================ Generic Extractor ========================
+    private suspend fun extractGenericVideos(hoster: Hoster, subTracks: List<Track>): List<Video> {
+        var embedUrl = hoster.hosterUrl
+        if (embedUrl.contains("vidy.st") && !embedUrl.contains("www.vidy.st")) {
+            embedUrl = embedUrl.replace("vidy.st", "www.vidy.st")
+        }
+        val embedUri = Uri.parse(embedUrl)
+        val embedHost = embedUri.host ?: "1shows.bz"
+
+        val embedHeaders = Headers.Builder()
+            .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .add("Referer", "https://www.1shows.bz/")
+            .add("Origin", "https://www.1shows.bz")
+            .build()
+
+        val videoHeaders = Headers.Builder()
+            .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .add("Referer", "https://$embedHost/")
+            .add("Origin", "https://$embedHost")
+            .build()
+
+        return try {
+            val videos = universalExtractor.videosFromUrl(embedUrl, embedHeaders, prefix = hoster.hosterName)
+            videos.map { v ->
+                Video(
+                    videoUrl = v.videoUrl,
+                    videoTitle = v.videoTitle,
+                    headers = videoHeaders,
+                    audioTracks = v.audioTracks,
+                    subtitleTracks = (v.subtitleTracks.orEmpty() + subTracks).distinctBy { it.url },
+                )
+            }
         } catch (_: Exception) {
             emptyList()
         }
@@ -637,38 +700,6 @@ class Oneshows :
             compareByDescending<Video> { hoster != null && it.videoTitle.contains(hoster, ignoreCase = true) }
                 .thenByDescending { quality != null && it.videoTitle.contains(quality, ignoreCase = true) },
         )
-    }
-
-    // ============================= Crypto Helpers =========================
-    private fun rc4Drop2048(key: ByteArray, data: ByteArray): ByteArray {
-        val s = IntArray(256) { it }
-        var j = 0
-        for (i in 0 until 256) {
-            j = (j + s[i] + (key[i % key.size].toInt() and 0xFF)) and 0xFF
-            val temp = s[i]
-            s[i] = s[j]
-            s[j] = temp
-        }
-        var i = 0
-        j = 0
-        for (discard in 0 until 2048) {
-            i = (i + 1) and 0xFF
-            j = (j + s[i]) and 0xFF
-            val temp = s[i]
-            s[i] = s[j]
-            s[j] = temp
-        }
-        val out = ByteArray(data.size)
-        for (k in data.indices) {
-            i = (i + 1) and 0xFF
-            j = (j + s[i]) and 0xFF
-            val temp = s[i]
-            s[i] = s[j]
-            s[j] = temp
-            val streamByte = s[(s[i] + s[j]) and 0xFF]
-            out[k] = (data[k].toInt() xor streamByte).toByte()
-        }
-        return out
     }
 
     private fun decryptVidrock(b64url: String): String {
@@ -691,8 +722,26 @@ class Oneshows :
         screen.addListPreference(
             key = PREF_HOSTER_KEY,
             title = "Preferred Server",
-            entries = listOf("Vidzee", "Vidrock", "VidFast", "VidLink", "Vidy", "Viduki"),
-            entryValues = listOf("Vidzee", "Vidrock", "VidFast", "VidLink", "Vidy", "Viduki"),
+            entries = listOf(
+                "Vidrock (Nova)",
+                "Vidrock (Atlas)",
+                "Vidrock (Astra)",
+                "MoviesAPI",
+                "VidFast",
+                "VidLink",
+                "Viduki",
+                "Vidy",
+            ),
+            entryValues = listOf(
+                "Nova",
+                "Atlas",
+                "Astra",
+                "MoviesAPI",
+                "VidFast",
+                "VidLink",
+                "Viduki",
+                "Vidy",
+            ),
             default = PREF_HOSTER_DEFAULT,
             summary = "%s",
         )
@@ -716,7 +765,7 @@ class Oneshows :
 
     companion object {
         private const val PREF_HOSTER_KEY = "preferred_hoster"
-        private const val PREF_HOSTER_DEFAULT = "Vidzee"
+        private const val PREF_HOSTER_DEFAULT = "Nova"
 
         private const val PREF_QUALITY_KEY = "preferred_quality"
         private const val PREF_QUALITY_DEFAULT = "1080"
@@ -907,4 +956,22 @@ data class VidrockServerDto(
     val type: String? = null,
     val language: String? = null,
     val flag: String? = null,
+)
+
+@Serializable
+data class AstraItemDto(
+    val resolution: Int? = null,
+    val url: String? = null,
+)
+
+@Serializable
+data class VidoraResponseDto(
+    val result: Boolean? = null,
+    val sources: List<VidoraSourceDto>? = null,
+)
+
+@Serializable
+data class VidoraSourceDto(
+    val url: String? = null,
+    val source: String? = null,
 )

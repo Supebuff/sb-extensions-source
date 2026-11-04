@@ -17,11 +17,13 @@ import eu.kanade.tachiyomi.network.POST
 import extensions.utils.Source
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.addSwitchPreference
+import keiyoushi.utils.applicationContext
 import keiyoushi.utils.parallelCatchingFlatMap
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -62,6 +64,7 @@ class Senshi :
     }
 
     private val streamProxy by lazy { SenshiStreamProxy(client) }
+    private val resolver by lazy { SenshiResolver(applicationContext, baseUrl, USER_AGENT) }
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("User-Agent", USER_AGENT)
@@ -87,25 +90,33 @@ class Senshi :
     // ============================== Popular ===============================
 
     override suspend fun getPopularAnime(page: Int): AnimesPage {
-        val period = preferences.getString(PREF_TRENDING_KEY, PREF_TRENDING_DEFAULT) ?: PREF_TRENDING_DEFAULT
-        // `/anime/trending/{day,week,month}` returns a bare JSON array (not a
-        // paged envelope), always in one shot — page 1 carries everything.
-        val animes = runCatching {
-            val element = json.parseToJsonElement(fetchText("$baseUrl/anime/trending/$period", headers))
-            (if (element is JsonArray) element else JsonArray(emptyList())).mapNotNull { parseAnime(it.jsonObject) }
-        }.getOrNull() ?: return AnimesPage(emptyList(), false)
-        return AnimesPage(if (page == 1) animes else emptyList(), false)
+        val body = buildJsonObject {
+            put("page", page)
+            put("limit", PAGE_SIZE)
+            put("sortBy", "score_desc")
+        }
+        val root = runCatching { postJson("$baseUrl/anime/filter", body) }.getOrNull()
+            ?: return AnimesPage(emptyList(), false)
+        val animes = root.array("data").mapNotNull { parseAnime(it.jsonObject) }
+        val total = root.int("total") ?: (page * PAGE_SIZE)
+        val hasNextPage = (page * PAGE_SIZE) < total && animes.isNotEmpty()
+        return AnimesPage(animes, hasNextPage)
     }
 
     // ============================== Latest ================================
 
     override suspend fun getLatestUpdates(page: Int): AnimesPage {
-        val period = preferences.getString(PREF_TRENDING_KEY, PREF_TRENDING_DEFAULT) ?: PREF_TRENDING_DEFAULT
-        val animes = runCatching {
-            val element = json.parseToJsonElement(fetchText("$baseUrl/anime/trending/$period", headers))
-            (if (element is JsonArray) element else JsonArray(emptyList())).mapNotNull { parseAnime(it.jsonObject) }
-        }.getOrNull() ?: return AnimesPage(emptyList(), false)
-        return AnimesPage(if (page == 1) animes else emptyList(), false)
+        val body = buildJsonObject {
+            put("page", page)
+            put("limit", PAGE_SIZE)
+            put("sortBy", "recent")
+        }
+        val root = runCatching { postJson("$baseUrl/anime/filter", body) }.getOrNull()
+            ?: return AnimesPage(emptyList(), false)
+        val animes = root.array("data").mapNotNull { parseAnime(it.jsonObject) }
+        val total = root.int("total") ?: (page * PAGE_SIZE)
+        val hasNextPage = (page * PAGE_SIZE) < total && animes.isNotEmpty()
+        return AnimesPage(animes, hasNextPage)
     }
 
     // =============================== Search ===============================
@@ -114,31 +125,51 @@ class Senshi :
         val body = buildJsonObject {
             put("page", page)
             put("limit", PAGE_SIZE)
-            if (query.isNotBlank()) put("search", query)
-            filters.filterIsInstance<Filters.SortFilter>().firstOrNull()
-                ?.let { put("sort", it.toUriPart()) }
-            filters.filterIsInstance<Filters.TypeFilter>().firstOrNull()
-                ?.let { if (it.toUriPart().isNotBlank()) put("type", it.toUriPart()) }
-            filters.filterIsInstance<Filters.StatusFilter>().firstOrNull()
-                ?.let { if (it.toUriPart().isNotBlank()) put("status", it.toUriPart()) }
-            filters.filterIsInstance<Filters.SeasonFilter>().firstOrNull()
-                ?.let { if (it.toUriPart().isNotBlank()) put("season", it.toUriPart()) }
-            filters.filterIsInstance<Filters.LanguageFilter>().firstOrNull()
-                ?.let { if (it.toUriPart().isNotBlank()) put("language", it.toUriPart()) }
+            if (query.isNotBlank()) put("searchTerm", query)
+
+            var sortApplied = false
+            filters.filterIsInstance<Filters.SortFilter>().firstOrNull()?.let {
+                val sort = it.toUriPart()
+                if (sort.isNotBlank()) {
+                    put("sortBy", sort)
+                    sortApplied = true
+                }
+            }
+            if (!sortApplied && query.isBlank()) {
+                put("sortBy", "score_desc")
+            }
+
+            filters.filterIsInstance<Filters.TypeFilter>().firstOrNull()?.let {
+                val type = it.toUriPart()
+                if (type.isNotBlank()) putJsonArray("types") { add(type) }
+            }
+            filters.filterIsInstance<Filters.StatusFilter>().firstOrNull()?.let {
+                val status = it.toUriPart()
+                if (status.isNotBlank()) putJsonArray("status") { add(status) }
+            }
+            filters.filterIsInstance<Filters.SeasonFilter>().firstOrNull()?.let {
+                val season = it.toUriPart()
+                if (season.isNotBlank()) putJsonArray("seasons") { add(season) }
+            }
+            filters.filterIsInstance<Filters.LanguageFilter>().firstOrNull()?.let {
+                val lang = it.toUriPart()
+                if (lang.isNotBlank()) putJsonArray("languages") { add(lang) }
+            }
             val genres = filters.filterIsInstance<Filters.GenreFilter>().firstOrNull()?.getSelectedValues().orEmpty()
             if (genres.isNotEmpty()) {
                 putJsonArray("genres") { genres.forEach(::add) }
             }
-            filters.filterIsInstance<Filters.YearFilter>().firstOrNull()
-                ?.let { it.state.toIntOrNull()?.let { year -> put("year", year) } }
+            filters.filterIsInstance<Filters.YearFilter>().firstOrNull()?.let {
+                val year = it.state.trim()
+                if (year.isNotBlank()) put("year", year)
+            }
         }
 
-        val root = runCatching { postJson("$baseUrl/anime/filter", body).jsonObject }.getOrNull()
+        val root = runCatching { postJson("$baseUrl/anime/filter", body) }.getOrNull()
             ?: return AnimesPage(emptyList(), false)
         val animes = root.array("data").mapNotNull { parseAnime(it.jsonObject) }
-        val totalPages = root.int("totalPages")
-        val hasNextPage = totalPages?.let { page < it }
-            ?: (animes.size >= PAGE_SIZE)
+        val total = root.int("total") ?: (page * PAGE_SIZE)
+        val hasNextPage = (page * PAGE_SIZE) < total && animes.isNotEmpty()
         return AnimesPage(animes, hasNextPage)
     }
 
@@ -222,6 +253,7 @@ class Senshi :
     }
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        resolver.warmUp()
         val numericId = resolveAnimeId(anime.url) ?: return emptyList()
         // Persist the resolved numeric id so hoster lookups stay cheap.
         anime.setUrlWithoutDomain("/anime/$numericId")
@@ -309,14 +341,27 @@ class Senshi :
         val remoteId = parts.getOrNull(0)?.toIntOrNull() ?: return emptyList()
         val audioBadge = parts.getOrNull(1)?.ifBlank { "Sub" } ?: "Sub"
 
+        val sourcesJson = resolver.resolve(remoteId)
         val sources = runCatching {
-            val element = json.parseToJsonElement(fetchText("$VIDCLOUD_SOURCES?id=$remoteId", streamHeaders()))
+            val element = if (!sourcesJson.isNullOrBlank()) {
+                json.parseToJsonElement(sourcesJson)
+            } else {
+                json.parseToJsonElement(fetchText("$VIDCLOUD_SOURCES?id=$remoteId", streamHeaders()))
+            }
             if (element is JsonArray) element else JsonArray(emptyList())
         }.getOrNull() ?: return emptyList()
 
         return sources.mapNotNull { it.jsonObject }.parallelCatchingFlatMap { entry ->
-            val src = entry["source"]?.jsonObject ?: return@parallelCatchingFlatMap emptyList()
-            val masterUrl = src.string("src")
+            val srcList = (entry["source"] as? JsonArray)?.mapNotNull { it.jsonObject }
+            val singleSrc = entry["source"] as? JsonObject
+            val src = if (!srcList.isNullOrEmpty()) {
+                val preferred = if (audioBadge.equals("Dub", ignoreCase = true)) "dub" else "sub"
+                srcList.find { it.string("label").equals(preferred, ignoreCase = true) }
+                    ?: srcList.first()
+            } else {
+                singleSrc ?: return@parallelCatchingFlatMap emptyList()
+            }
+            val masterUrl = src.string("src").ifBlank { src.string("file") }
             if (!masterUrl.startsWith("http")) return@parallelCatchingFlatMap emptyList()
 
             val subtitles = entry.array("tracks").mapNotNull { item ->
@@ -328,17 +373,21 @@ class Senshi :
                 Track(fixImageUrl(file), label)
             }
 
-            val master = try {
-                Em3u8.decrypt(fetchText(masterUrl, streamHeaders()))
+            val rawPlaylist = try {
+                fetchText(masterUrl, streamHeaders())
             } catch (_: Exception) {
                 return@parallelCatchingFlatMap emptyList()
-            } ?: return@parallelCatchingFlatMap emptyList()
+            }
+
+            val master = Em3u8.decrypt(rawPlaylist)
+                ?: rawPlaylist.takeIf { it.trimStart().startsWith("#EXTM3U") }
+                ?: return@parallelCatchingFlatMap emptyList()
 
             val referer = "$baseUrl/"
             // Every playlist in the vidcloud chain — master, variant and audio
-            // renditions — is an EM3U8v1 envelope. Children are therefore routed
-            // back through the loopback relay, which decrypts them before handing
-            // a valid playlist (and clean TS chunks) to the player.
+            // renditions — is an EM3U8v1 envelope or direct HLS playlist. Children are
+            // routed back through the loopback relay, which decrypts envelopes if needed
+            // and forwards appropriate headers (Origin/Referer/User-Agent).
             val audioLines = master.lines()
                 .filter { it.startsWith("#EXT-X-MEDIA:TYPE=AUDIO") }
                 .map { line ->
@@ -347,7 +396,23 @@ class Senshi :
                     }
                 }
             val streamInfos = Regex("""#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)""").findAll(master).toList()
-            if (streamInfos.isEmpty()) return@parallelCatchingFlatMap emptyList()
+            if (streamInfos.isEmpty()) {
+                val declared = src.string("quality")
+                val miniMaster = buildString {
+                    append("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n")
+                    audioLines.forEach { append(it).append('\n') }
+                    append("#EXT-X-STREAM-INF:BANDWIDTH=0\n")
+                    append(streamProxy.relay(masterUrl, referer)).append('\n')
+                }
+                return@parallelCatchingFlatMap listOf(
+                    Video(
+                        videoUrl = streamProxy.serveText(miniMaster, MIME_HLS),
+                        videoTitle = "Senshi ${if (declared.isNotBlank()) declared else "Auto"} [$audioBadge]",
+                        headers = streamHeaders(),
+                        subtitleTracks = subtitles,
+                    ),
+                )
+            }
 
             val preferredQuality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT) ?: PREF_QUALITY_DEFAULT
             val videos = streamInfos.mapNotNull { match ->
@@ -377,26 +442,6 @@ class Senshi :
                 )
             }
 
-            // List the entry's own declared quality first when the master omits it.
-            if (videos.isEmpty()) {
-                val declared = src.string("quality")
-                if (declared.isNotBlank()) {
-                    val miniMaster = buildString {
-                        append("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n")
-                        audioLines.forEach { append(it).append('\n') }
-                        append("#EXT-X-STREAM-INF:BANDWIDTH=0\n")
-                        append(streamProxy.relay(masterUrl, referer)).append('\n')
-                    }
-                    return@parallelCatchingFlatMap listOf(
-                        Video(
-                            videoUrl = streamProxy.serveText(miniMaster, MIME_HLS),
-                            videoTitle = "Senshi $declared [$audioBadge]",
-                            headers = streamHeaders(),
-                            subtitleTracks = subtitles,
-                        ),
-                    )
-                }
-            }
             videos.filter {
                 preferredQuality == "auto" || it.videoTitle.contains(preferredQuality, ignoreCase = true) || videos.size == 1
             }.ifEmpty { videos }

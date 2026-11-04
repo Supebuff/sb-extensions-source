@@ -1,8 +1,0 @@
-ext {
-    extName = 'Mango Live TV'
-    extClass = '.MangoLiveTV'
-    extVersionCode = 2
-    isNsfw = false
-}
-
-apply from: "$rootDir/common.gradle"

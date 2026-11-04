@@ -243,7 +243,9 @@ class CloudflareInterceptor(
         destroyLatch.await(TEARDOWN_ACK_MS, TimeUnit.MILLISECONDS)
 
         // Extract cookies from CookieManager and sync into OkHttp + cache.
-        val cookieHeader = CookieManager.getInstance().getCookie(requestUrlString) ?: ""
+        val cookieHeader = CookieManager.getInstance().getCookie(requestUrlString)
+            ?: CookieManager.getInstance().getCookie("https://${url.host}/")
+            ?: ""
         val cookies = cookieHeader.split(";")
             .mapNotNull { raw ->
                 val parsed = Cookie.parse(url, raw.trim())
@@ -298,9 +300,13 @@ class CloudflareInterceptor(
             )
             addAll(matching)
         }
-        return request.newBuilder()
+        val builder = request.newBuilder()
             .header("Cookie", merged.joinToString("; ") { "${it.name}=${it.value}" })
-            .build()
+        val requestUa = request.header("User-Agent")
+        if (requestUa.isNullOrBlank() || requestUa != userAgent) {
+            builder.header("User-Agent", userAgent)
+        }
+        return builder.build()
     }
 
     private fun isCloudflareChallenge(response: Response): Boolean {
@@ -334,7 +340,7 @@ class CloudflareInterceptor(
         /** Canonical User-Agent: Chrome 131 / Windows — matches the
          *  WebView Chromium engine (the TLS stack carrying cf_clearance
          *  solve) when a Windows-shaped UA override is in effect. */
-        internal const val DEFAULT_USER_AGENT =
+        const val DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         /** Per-attempt WebView solve timeout. CF managed ~5s, Turnstile ~8-15s. */
@@ -383,10 +389,12 @@ class CloudflareInterceptor(
                     try {
                         var cookie = document.cookie || '';
                         var hasClearance = cookie.indexOf('cf_clearance=') !== -1;
-                        var noChallengeForm = !document.querySelector('#challenge-form')
-                            && !document.querySelector('#challenge-stage')
-                            && !document.querySelector('.cf-turnstile');
-                        if (hasClearance || (noChallengeForm && attempts > 2)) {
+                        var isChallenge = document.title.indexOf('Just a moment') !== -1
+                            || document.querySelector('#challenge-error-text') !== null
+                            || document.querySelector('#challenge-form') !== null
+                            || document.querySelector('#challenge-stage') !== null
+                            || document.querySelector('.cf-turnstile') !== null;
+                        if (hasClearance || (!isChallenge && attempts > 4)) {
                             clearInterval(timer);
                             try { CloudflareJSI.leave(); } catch (e) {}
                         } else if (attempts >= maxAttempts) {

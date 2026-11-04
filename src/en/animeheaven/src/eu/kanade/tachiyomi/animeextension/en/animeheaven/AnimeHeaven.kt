@@ -14,6 +14,7 @@ import extensions.utils.Source
 import extensions.utils.asJsoup
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.addSetPreference
+import okhttp3.CookieJar
 import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
@@ -30,26 +31,36 @@ class AnimeHeaven : Source() {
 
     override val supportsLatest = true
 
+    private val noCookieClient by lazy {
+        client.newBuilder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .build()
+    }
+
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("User-Agent", DEFAULT_USER_AGENT)
         .add("Referer", "$baseUrl/")
 
     // ============================== Popular ===============================
     override suspend fun getPopularAnime(page: Int): AnimesPage {
-        val response = client.newCall(GET("$baseUrl/popular.php?page=$page", headers)).execute()
+        if (page > 1) return AnimesPage(emptyList(), false)
+        val response = client.newCall(GET("$baseUrl/popular.php", headers)).execute()
         return parseAnimeListPage(response)
     }
 
     // ============================== Latest ================================
     override suspend fun getLatestUpdates(page: Int): AnimesPage {
-        val response = client.newCall(GET("$baseUrl/new.php?page=$page", headers)).execute()
+        if (page > 1) return AnimesPage(emptyList(), false)
+        val response = client.newCall(GET("$baseUrl/new.php", headers)).execute()
         return parseAnimeListPage(response)
     }
 
     // =============================== Search ===============================
     override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
-        if (query.isNotBlank()) {
-            val response = client.newCall(GET("$baseUrl/search.php?s=${query.encodeForQuery()}&page=$page", headers)).execute()
+        val trimmedQuery = query.trim()
+        if (trimmedQuery.isNotBlank()) {
+            if (page > 1) return AnimesPage(emptyList(), false)
+            val response = client.newCall(GET("$baseUrl/search.php?s=${trimmedQuery.encodeForQuery()}", headers)).execute()
             return parseSearchAnimeListPage(response)
         }
 
@@ -57,7 +68,8 @@ class AnimeHeaven : Source() {
         val selectedGenre = genreFilter?.getSelectedValue() ?: ""
 
         if (selectedGenre.isNotBlank()) {
-            val response = client.newCall(GET("$baseUrl/tags.php?tag=${selectedGenre.encodeForQuery()}&page=$page", headers)).execute()
+            if (page > 1) return AnimesPage(emptyList(), false)
+            val response = client.newCall(GET("$baseUrl/tags.php?tag=${selectedGenre.encodeForQuery()}", headers)).execute()
             return parseSearchAnimeListPage(response)
         }
 
@@ -74,8 +86,7 @@ class AnimeHeaven : Source() {
         val animeList = doc.select("div.chart.bc1").mapNotNull { element ->
             parseChartElement(element)
         }
-        val hasNext = animeList.isNotEmpty()
-        return AnimesPage(animeList, hasNext)
+        return AnimesPage(animeList, false)
     }
 
     private fun parseSearchAnimeListPage(response: Response): AnimesPage {
@@ -83,8 +94,7 @@ class AnimeHeaven : Source() {
         val animeList = doc.select("div.similarimg").mapNotNull { element ->
             parseSimilarElement(element)
         }
-        val hasNext = animeList.isNotEmpty()
-        return AnimesPage(animeList, hasNext)
+        return AnimesPage(animeList, false)
     }
 
     private fun parseChartElement(element: Element): SAnime? {
@@ -179,25 +189,54 @@ class AnimeHeaven : Source() {
 
     // ============================== Episodes ==============================
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
-        val path = if (anime.url.startsWith("/")) anime.url else "/${anime.url}"
+        val cleanUrl = anime.url.removePrefix(baseUrl)
+        val path = if (cleanUrl.startsWith("/")) cleanUrl else "/$cleanUrl"
         val response = client.newCall(GET("$baseUrl$path", headers)).execute()
-        val html = response.body.string()
+        val doc = response.asJsoup()
+        val animeId = path.substringAfter("anime.php?", "").ifBlank { path.substringAfterLast("/") }
 
-        // Match gatea("HASH") and capture episode number from watch2 div
-        val regex = Regex("""onclick='gatea\("([a-f0-9]+)"\)'[^>]*>(?:[\s\S]*?)<div[^>]*\bwatch2\b[^>]*>\s*(\d+)\s*</div>""")
-        val animeId = path.removePrefix("/").removePrefix("anime.php?")
+        val episodes = doc.select("a[href*=gate.php], a:has(div.watch2)").mapNotNull { element ->
+            val id = element.id().trim()
+            val gateKey = if (id.length == 32 && id.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
+                id
+            } else {
+                val onclick = element.attr("onclick")
+                val onmouseover = element.attr("onmouseover")
+                Regex("""gate[ah]\s*\(\s*["']([a-f0-9]{32})["']""", RegexOption.IGNORE_CASE)
+                    .find("$onclick $onmouseover")?.groupValues?.get(1)
+                    ?: return@mapNotNull null
+            }
 
-        val episodes = regex.findAll(html).mapNotNull { match ->
-            val gateKey = match.groupValues[1]
-            val epNum = match.groupValues[2].toFloatOrNull() ?: return@mapNotNull null
+            val epText = element.selectFirst("div.watch2")?.text()?.trim().orEmpty()
+            val epNum = epText.toFloatOrNull()
+                ?: Regex("""(\d+(?:\.\d+)?)""").find(epText)?.groupValues?.get(1)?.toFloatOrNull()
+                ?: Regex("""Episode\s*(\d+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
+                    .find(element.text())?.groupValues?.get(1)?.toFloatOrNull()
+                ?: return@mapNotNull null
 
             SEpisode.create().apply {
-                name = "Episode ${epNum.toInt()}"
+                name = if (epNum % 1f == 0f) "Episode ${epNum.toInt()}" else "Episode $epNum"
                 episode_number = epNum
                 url = "/gate.php?key=$gateKey&anime=$animeId"
                 scanlator = "Sub"
             }
-        }.toList()
+        }.distinctBy { it.episode_number }
+
+        if (episodes.isEmpty()) {
+            val html = doc.html()
+            val fallbackRegex = Regex("""gate[ah]\s*\(\s*["']([a-f0-9]{32})["'][\s\S]*?\bwatch2\b[^>]*>\s*(\d+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
+            return fallbackRegex.findAll(html).mapNotNull { match ->
+                val gateKey = match.groupValues[1]
+                val epNum = match.groupValues[2].toFloatOrNull() ?: return@mapNotNull null
+
+                SEpisode.create().apply {
+                    name = if (epNum % 1f == 0f) "Episode ${epNum.toInt()}" else "Episode $epNum"
+                    episode_number = epNum
+                    url = "/gate.php?key=$gateKey&anime=$animeId"
+                    scanlator = "Sub"
+                }
+            }.toList().distinctBy { it.episode_number }.sortedByDescending { it.episode_number }
+        }
 
         return episodes.sortedByDescending { it.episode_number }
     }
@@ -212,7 +251,11 @@ class AnimeHeaven : Source() {
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val epUrl = hoster.hosterUrl
-        val gateKey = epUrl.substringAfter("key=").substringBefore("&")
+        val gateKey = if (epUrl.contains("key=")) {
+            epUrl.substringAfter("key=").substringBefore("&")
+        } else {
+            epUrl.substringAfterLast("/")
+        }
         val animeId = epUrl.substringAfter("anime=", "")
         val animeReferer = if (animeId.isNotBlank()) "$baseUrl/anime.php?$animeId" else "$baseUrl/anime.php"
 
@@ -220,38 +263,45 @@ class AnimeHeaven : Source() {
             .url("$baseUrl/gate.php")
             .headers(
                 headers.newBuilder()
-                    .add("Cookie", "key=$gateKey")
+                    .set("Cookie", "key=$gateKey")
                     .set("Referer", animeReferer)
                     .build(),
             )
             .build()
 
-        val html = client.newCall(gateRequest).execute().body.string()
+        val response = noCookieClient.newCall(gateRequest).execute()
+        val doc = response.asJsoup()
 
         val sourceUrls = mutableListOf<String>()
 
-        // 1. Grab full video URLs from <source> tags
-        val sourceRegex = Regex("""<source[^>]+src=['"]([^'"]+\.mp4[^'"]*)['"]""", RegexOption.IGNORE_CASE)
-        sourceRegex.findAll(html).forEach { m ->
-            val src = m.groupValues[1]
-            if (src.isNotBlank()) sourceUrls.add(src)
+        // 1. Grab full video URLs from <source> tags inside <video> (ignores HTML comments / honeypots)
+        doc.select("video source").forEach { element ->
+            val src = element.absUrl("src").ifBlank { element.attr("src") }
+            if (src.isNotBlank() && !src.contains("ax.animeheaven.me")) {
+                sourceUrls.add(src)
+            }
         }
 
         // 2. Fallback: grab from download anchor
         if (sourceUrls.isEmpty()) {
-            val dlMatch = Regex("""href=['"](https?://ax\.animeheaven\.me/video\.mp4\?[^'"]+)['"]""").find(html)
-            if (dlMatch != null) {
-                sourceUrls.add(dlMatch.groupValues[1])
+            val dlUrl = doc.selectFirst("a[href*=/video.mp4?]")?.absUrl("href")
+            if (!dlUrl.isNullOrBlank() && !dlUrl.contains("ax.animeheaven.me")) {
+                sourceUrls.add(dlUrl)
             }
         }
 
         // 3. Fallback: reconstruct from token match
         if (sourceUrls.isEmpty()) {
-            val tokenMatch = Regex("""video\.mp4\?([a-f0-9]+)&([a-f0-9]+)""").find(html)
+            val html = doc.html()
+            val tokenMatch = Regex("""(?:https?://([a-z0-9.]+)/)?video\.mp4\?([a-f0-9]+)&([a-f0-9]+)""").find(html)
             if (tokenMatch != null) {
-                val t1 = tokenMatch.groupValues[1]
-                val t2 = tokenMatch.groupValues[2]
-                sourceUrls.add("https://ax.animeheaven.me/video.mp4?$t1&$t2")
+                val host = tokenMatch.groupValues[1].ifBlank { "ca.animeheaven.me" }
+                val t1 = tokenMatch.groupValues[2]
+                val t2 = tokenMatch.groupValues[3]
+                val url = "https://$host/video.mp4?$t1&$t2"
+                if (!url.contains("ax.animeheaven.me")) {
+                    sourceUrls.add(url)
+                }
             }
         }
 
@@ -314,8 +364,8 @@ class AnimeHeaven : Source() {
             title = "Preferred Server",
             default = PREF_SERVER_DEFAULT,
             summary = "%s",
-            entries = listOf("Auto", "Server 1", "Server 2"),
-            entryValues = listOf("auto", "Server 1", "Server 2"),
+            entries = listOf("Auto", "Server 1", "Server 2", "Server 3"),
+            entryValues = listOf("auto", "Server 1", "Server 2", "Server 3"),
         )
         screen.addSetPreference(
             key = PREF_EXCLUDE_SERVERS_KEY,
