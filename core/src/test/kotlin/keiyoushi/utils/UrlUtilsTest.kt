@@ -42,6 +42,33 @@ class UrlUtilsTest {
     }
 
     @Test
+    fun `fixUrl removes concatenated protocols in both overloads`() {
+        for (prefix in listOf("http", "https")) {
+            for (protocol in listOf("http", "https")) {
+                val expected = "$protocol://cdn.example.com/path?token=123#fragment"
+                val url = "$prefix://example.com$expected"
+                assertEquals(expected, UrlUtils.fixUrl(url))
+                assertEquals(expected, UrlUtils.fixUrl(url, "https://base.example.com/"))
+            }
+        }
+    }
+
+    @Test
+    fun `fixUrl preserves embedded URLs in valid paths queries and fragments`() {
+        val urls = listOf(
+            "https://example.com/proxy/https://cdn.example.com/video.m3u8",
+            "https://example.com/watch?redirect=https://other.example.com/path",
+            "https://example.com/watch#https://other.example.com/path",
+            "//example.com/watch?redirect=https://other.example.com/path",
+        )
+        for (url in urls) {
+            val expected = if (url.startsWith("//")) "https:$url" else url
+            assertEquals(expected, UrlUtils.fixUrl(url))
+            assertEquals(expected, UrlUtils.fixUrl(url, "https://base.example.com/"))
+        }
+    }
+
+    @Test
     fun `fixUrl strips non-url prefix before first http URL`() {
         val url = "prefix text https://example.com/path"
         assertEquals("https://example.com/path", UrlUtils.fixUrl(url))
