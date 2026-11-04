@@ -8,10 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: Extensions to build
+        description: Fork-added extensions to build
         type: choice
-        default: mugua
-        options: [mugua, changed, all]
+        default: added
+        options: [added, changed]
 
 permissions:
   contents: read

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan read-only CI builds using the upstream dependency selector."""
+"""Build only extensions added by this fork relative to upstream."""
 import argparse
 import importlib.util
 import json
@@ -12,7 +12,6 @@ spec = importlib.util.spec_from_file_location("upstream_matrix", HELPER_PATH)
 upstream = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(upstream)
 
-SMOKE_MODULE = ":src:zh:mugua"
 CI_PATHS = (
     ".github/workflows/build_push.yml",
     ".github/scripts/ci-matrix.py",
@@ -27,11 +26,21 @@ def git(*args):
     ).stdout.strip()
 
 
-def plan(scope, base):
-    if scope == "mugua":
-        modules = [SMOKE_MODULE]
-    elif scope == "all" or not base or set(base) == {"0"}:
-        modules, _ = upstream.get_all_modules()
+def added_modules(upstream_ref):
+    resolved = git("rev-parse", "--verify", "--end-of-options", upstream_ref + "^{commit}")
+    existing = set()
+    for path in git("ls-tree", "-r", "--name-only", resolved, "--", "src").splitlines():
+        parts = path.split("/")
+        if len(parts) == 4 and parts[3] in ("build.gradle", "build.gradle.kts"):
+            existing.add(f":src:{parts[1]}:{parts[2]}")
+    current, _ = upstream.get_all_modules()
+    return set(current) - existing
+
+
+def plan(scope, base, upstream_ref="origin/upstream"):
+    added = added_modules(upstream_ref)
+    if scope == "added" or not base or set(base) == {"0"}:
+        modules = added
     else:
         # Fail on missing history instead of silently checking the wrong commit.
         resolved = git("rev-parse", "--verify", "--end-of-options", base + "^{commit}")
@@ -39,7 +48,10 @@ def plan(scope, base):
         os.environ["IS_PR_CHECK"] = "true"
         modules, _ = upstream.get_module_list(resolved)
         if any(path.startswith(CI_PATHS) for path in changed):
-            modules = sorted(set(modules) | {SMOKE_MODULE})
+            modules = set(modules) | added
+
+    # Core/build changes and upstream merges must not widen this fork's scope.
+    modules = sorted(set(modules) & added)
 
     for module in modules:
         directory = Path(*module.lstrip(":").split(":"))
@@ -55,10 +67,11 @@ def plan(scope, base):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scope", choices=["changed", "all", "mugua"], default="changed")
+    parser.add_argument("--scope", choices=["changed", "added"], default="changed")
     parser.add_argument("--base", default="origin/upstream")
+    parser.add_argument("--upstream", default="origin/upstream")
     args = parser.parse_args()
-    matrix = plan(args.scope, args.base)
+    matrix = plan(args.scope, args.base, args.upstream)
     has_build = bool(matrix["chunk"])
     print(json.dumps(matrix, indent=2))
     if output := os.getenv("GITHUB_OUTPUT"):
@@ -68,11 +81,11 @@ def main():
     if summary := os.getenv("GITHUB_STEP_SUMMARY"):
         tasks = [task for chunk in matrix["chunk"] for task in chunk["modules"]]
         with open(summary, "a", encoding="utf-8") as handle:
-            handle.write("## Debug APK build plan\n\n")
+            handle.write("## Fork-added extension build plan\n\n")
             handle.write(f"{len(tasks)} extension(s), {len(matrix['chunk'])} runner(s).\n\n")
             handle.write("\n".join(f"- `{task}`" for task in tasks))
             if not tasks:
-                handle.write("No extension or shared build changes; APK build skipped.\n")
+                handle.write("No affected fork-added extensions; APK build skipped.\n")
 
 
 if __name__ == "__main__":
