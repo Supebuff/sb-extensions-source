@@ -89,6 +89,7 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 - 邊界：減少播放與重連時經過網站驗證入口，不代表無條件解決 Cloudflare；列表／縮圖仍走原流程，MPV 重連由宿主控制。最終 CDN 網址可能到期，需重新開播解析；不能把 HTTP 成功宣稱為手機無感切網路已通過。
 - 回歸範圍：簽名 query 保留、跨主機標頭隔離、同主機標頭、無副檔名媒體、Range 被忽略時限制讀取、HTML／非 MP4／短回應／錯誤範圍拒絕、HTTP 錯誤不無限重試與等待取消；`LiveSiteTest` 另檢查最終網址可再次讀取前 1024 bytes。
 - 版本遞增至 16.2，保留套件／來源 ID 與已儲存作品／集數網址。手機待測：行動數據／Wi-Fi 雙向切換及續播、切換後拖曳／畫質切換、長時間與到期後恢復、下載及外部播放器；16.1 的已知樣本結果保留於下表。
+- 驗證結果：2026-11-06，[提交 5db636e](https://github.com/Supebuff/sb-extensions-source/commit/5db636ee234e6a618b39afe4434b1456d5d4568e)的 [CI #22](https://github.com/Supebuff/sb-extensions-source/actions/runs/42129100222)通過來源與 core JVM 測試、Release 建置、固定簽名及套件庫發布，索引為 X1hub 16.2。以 JDK 17／OkHttp JVM 5.3.2 直接執行相同 `LiveSiteTest` 亦通過：四種列表各 24 + 24 筆，720p／480p 都解析到不同的最終網址，並能再次取得 HTTP 206 與前 1024 bytes 的 MP4 ftyp；手機切網路結果仍待確認。
 
 以下為 2026-11-05 使用者回報，並於 2026-11-06 補充網路切換結果；宿主 AniZen 0.5.220、Android 16、來源 16.1。不代表全片庫或所有網路環境。
 
