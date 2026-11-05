@@ -80,8 +80,10 @@ class SigningTests(unittest.TestCase):
         def wrong(command, env):
             result = self.runner(command, env)
             return result.replace(self.fingerprint, 'b' * 64)
-        with self.assertRaises(signing.SigningError):
+        with self.assertRaises(signing.SigningError) as error:
             self.sign(wrong)
+        self.assertIn('reported certificate SHA256=' + 'b' * 64, str(error.exception))
+        self.assertNotIn('store-secret', str(error.exception))
         self.assertFalse(self.output.exists())
         self.assertFalse(self.key_path.exists())
 
@@ -91,6 +93,14 @@ class SigningTests(unittest.TestCase):
                        f'Signer #2 certificate SHA-256 digest: {self.fingerprint}\n'):
             with self.assertRaises(signing.SigningError):
                 signing.verify_fingerprint(result, self.fingerprint)
+
+    def test_unrecognized_output_reports_public_digest_but_still_refuses_publishing(self):
+        with self.assertRaises(signing.SigningError) as error:
+            signing.verify_fingerprint(
+                f'Signer (SDK range) certificate SHA-256 digest: {self.fingerprint}\n', self.fingerprint,
+            )
+        self.assertIn('recognized signers=0', str(error.exception))
+        self.assertIn('reported certificate SHA256=' + self.fingerprint, str(error.exception))
 
     def test_tool_failure_cleans_key_and_publishes_nothing(self):
         def failing(command, env):

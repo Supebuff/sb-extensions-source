@@ -47,7 +47,14 @@ def expected_fingerprint(path):
 def verify_fingerprint(output, expected):
     signers = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)\s*$', output, re.MULTILINE)
     if len(signers) != 1 or signers[0].lower() != expected:
-        raise SigningError('APK signer does not match the pinned certificate; refusing to publish.')
+        # Certificate hashes are public. Report only hashes to distinguish a different
+        # key from a new apksigner output format without logging private credentials.
+        reported = re.findall(r'^.*certificate SHA-256 digest: ([0-9a-fA-F]{64})\s*$', output, re.MULTILINE)
+        raise SigningError(
+            'APK signer does not match the pinned certificate; refusing to publish. '
+            f'Expected SHA256={expected}; recognized signers={len(signers)}; '
+            f'reported certificate SHA256={",".join(reported) or "none"}.'
+        )
 
 
 def discover_apks(root):
