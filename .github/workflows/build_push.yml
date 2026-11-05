@@ -83,12 +83,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: ${{ github.event_name == 'pull_request' }}
-      - name: Build debug APKs and run core tests
+      - name: Build debug APKs and run extension and core tests
         env:
           BUILD_TASKS: ${{ toJSON(matrix.chunk.modules) }}
           CHUNK_NUMBER: ${{ matrix.chunk.number }}
         run: |
           mapfile -t tasks < <(python3 -c 'import json, os; print("\n".join(json.loads(os.environ["BUILD_TASKS"])))')
+          for task in "${tasks[@]}"; do
+            tasks+=("${task%:assembleDebug}:testDebugUnitTest")
+          done
           if [[ "$CHUNK_NUMBER" == 1 ]]; then
             tasks+=(":core:testDebugUnitTest")
           fi

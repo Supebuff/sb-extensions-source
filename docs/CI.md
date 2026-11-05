@@ -7,7 +7,7 @@ The `CI` workflow runs for pushes to `dev`, pull requests targeting `dev`, and m
 - Validate the workflow with actionlint and run the offline CI selector regression tests.
 - Build Debug APKs only for extensions added by this fork, identified by comparing module build files with `origin/upstream`. Currently this is `zh/mugua`; newly added modules are discovered automatically.
 - Within that scope, select affected extensions and transitive dependents. Core, build configuration, and CI changes rebuild fork-added extensions without building the upstream catalog. Documentation-only or upstream-extension-only changes skip APK builds.
-- Run the existing core JVM unit tests in the first build chunk.
+- Run each selected extension's JVM unit tests and the existing core JVM unit tests in the first build chunk.
 - Require a successful `CI result` check; failed or cancelled builds cannot produce a passing result.
 
 Changes are compared against the push's previous commit, or the pull request's base commit. Missing history or a missing upstream reference fails explicitly. A first push with no previous commit builds only fork-added extensions. Libraries required by those extensions are still compiled as dependencies.

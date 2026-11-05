@@ -1,8 +1,21 @@
 ext {
     extName = 'Mugua'
     extClass = '.Mugua'
-    extVersionCode = 2
+    extVersionCode = 3
     isNsfw = true
 }
 
 apply from: "$rootDir/common.gradle"
+
+android.sourceSets {
+    test {
+        java.srcDirs = ['test']
+        kotlin.srcDirs = ['test']
+    }
+}
+
+dependencies {
+    testImplementation(libs.junit)
+    testImplementation(libs.jsoup)
+    testImplementation(libs.okhttp)
+}

@@ -9,12 +9,12 @@ import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.network.GET
 import extensions.utils.Source
-import extensions.utils.asJsoup
+import extensions.utils.get
 import keiyoushi.utils.addListPreference
+import okhttp3.CacheControl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Response
+import java.io.IOException
 
 class Mugua : Source() {
 
@@ -55,8 +55,7 @@ class Mugua : Source() {
     }
 
     override fun getFilterList(): AnimeFilterList = AnimeFilterList(
-        TagFilter("分類", CATEGORIES),
-        TagFilter("廠商", MAKERS),
+        TagFilter("分類／廠商", CATEGORIES + MAKERS.drop(1)),
     )
 
     private suspend fun fetchListing(listingUrl: String, page: Int): AnimesPage {
@@ -68,64 +67,42 @@ class Mugua : Source() {
             }
         } ?: return AnimesPage(emptyList(), false)
 
-        val response = client.newCall(GET(url, headers)).execute()
-        return parseListing(response, listingUrl, page)
-    }
-
-    private fun parseListing(response: Response, listingUrl: String, page: Int): AnimesPage {
-        val document = response.asJsoup()
-        val items = document.select("a[href*='watch.jsp?v=']").mapNotNull { link ->
-            val href = link.absUrl("href").ifBlank { link.attr("href") }
-            val title = link.selectFirst(".thumb-spot__title, h5")?.text()?.trim().orEmpty()
-            if (href.isBlank() || title.isBlank()) return@mapNotNull null
-
-            val image = link.selectFirst("img")
-            val thumbnail = image?.let {
-                listOf("src", "data-src", "data-original", "data-lazy-src")
-                    .firstNotNullOfOrNull { attribute ->
-                        it.absUrl(attribute).takeIf(String::isNotBlank)
-                    }
-            }
-
+        val listing = client.get(url, headers).use { response ->
+            MuguaParser.listing(response.body.string(), response.request.url.toString(), page)
+        }
+        val items = listing.items.map { item ->
             SAnime.create().apply {
-                this.title = title
-                setUrlWithoutDomain(href)
-                thumbnail_url = thumbnail
+                title = item.title
+                setUrlWithoutDomain(item.url)
+                thumbnail_url = item.thumbnail
                 fetch_type = FetchType.Episodes
             }
-        }.distinctBy { it.url }
-
-        val nextPage = page + 1
-        var hasNextPage = false
-        val links = document.select("a[href*='p=']")
+        }
         synchronized(pageUrls) {
+            if (page == 1) pageUrls.remove(listingUrl)
             val pages = pageUrls.getOrPut(listingUrl) { mutableMapOf(1 to listingUrl) }
-            links.forEach { link ->
-                val numberedPage = link.text().trim().toIntOrNull()
-                val href = link.absUrl("href")
-                if (numberedPage != null && href.isNotBlank()) {
-                    pages[numberedPage] = href
-                }
-            }
-
-            val nextLink = links.firstOrNull { it.text().trim().toIntOrNull() == nextPage }
-                ?: links.lastOrNull { it.text().isBlank() }
-            nextLink?.absUrl("href")?.takeIf(String::isNotBlank)?.let {
-                pages[nextPage] = it
-                hasNextPage = true
+            pages.putAll(listing.numberedPages)
+            if (listing.nextPageUrl != null) {
+                pages[page + 1] = listing.nextPageUrl
+            } else {
+                pages.remove(page + 1)
             }
         }
-
-        return AnimesPage(items, hasNextPage)
+        return AnimesPage(items, listing.nextPageUrl != null)
     }
 
-    override suspend fun getAnimeDetails(anime: SAnime): SAnime = SAnime.create().apply {
-        title = anime.title
-        url = anime.url
-        thumbnail_url = anime.thumbnail_url
-        description = "單集 720p HLS 播放。"
-        fetch_type = FetchType.Episodes
-        initialized = true
+    override suspend fun getAnimeDetails(anime: SAnime): SAnime {
+        val details = client.get(absoluteUrl(anime.url), headers).use { response ->
+            MuguaParser.details(response.body.string(), response.request.url.toString())
+        }
+        return SAnime.create().apply {
+            title = details?.title ?: anime.title
+            url = anime.url
+            thumbnail_url = details?.thumbnail ?: anime.thumbnail_url
+            description = "單集 HLS 播放。"
+            fetch_type = FetchType.Episodes
+            initialized = true
+        }
     }
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> = listOf(
@@ -137,27 +114,32 @@ class Mugua : Source() {
     )
 
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> = listOf(
-        Hoster(hosterName = "720p", hosterUrl = episode.url),
+        Hoster(hosterName = "HLS", hosterUrl = episode.url),
     )
 
-    override suspend fun getVideoList(hoster: Hoster): List<Video> = try {
-        val pageUrl = absoluteUrl(hoster.hosterUrl)
-        val html = client.newCall(GET(pageUrl, headers)).execute().use { it.body.string() }
-        val videoUrl = extractVideoUrl(html) ?: return emptyList()
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = resolveVideos(hoster.hosterUrl)
+
+    override suspend fun getVideoList(episode: SEpisode): List<Video> = resolveVideos(episode.url)
+
+    private suspend fun resolveVideos(url: String): List<Video> {
+        val (pageUrl, videoUrl) = client.get(absoluteUrl(url), headers, cache = CacheControl.FORCE_NETWORK).use { response ->
+            val pageUrl = response.request.url.toString()
+            val videoUrl = MuguaParser.videoUrl(response.body.string(), pageUrl)
+                ?: throw IOException("找不到 HLS 播放連結，請稍後重試或在 WebView 確認頁面。")
+            pageUrl to videoUrl
+        }
         val videoHeaders = headers.newBuilder()
             .set("Referer", pageUrl)
             .build()
 
-        listOf(
+        return listOf(
             Video(
                 videoUrl = videoUrl,
-                videoTitle = "720p",
+                videoTitle = "HLS",
                 headers = videoHeaders,
                 preferred = true,
             ),
         )
-    } catch (_: Exception) {
-        emptyList()
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
@@ -180,22 +162,8 @@ class Mugua : Source() {
             .toString()
     }
 
-    private fun absoluteUrl(url: String): String = if (url.startsWith("http")) {
-        url
-    } else {
-        "$baseUrl/${url.trimStart('/')}"
-    }
-
-    private fun extractVideoUrl(html: String): String? = OBFUSCATED_SCRIPT_REGEX.findAll(html)
-        .firstNotNullOfOrNull { match ->
-            val decoded = decodeXor128(match.groupValues[1])
-            PLAYER_VIDEO_URL_REGEX.find(decoded)?.groupValues?.get(1)
-                ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
-        }
-
-    private fun decodeXor128(value: String): String = buildString(value.length) {
-        value.forEach { append((it.code xor 0x80).toChar()) }
-    }
+    private fun absoluteUrl(url: String): String = "$baseUrl/".toHttpUrl().resolve(url)?.toString()
+        ?: throw IOException("無效的頁面網址")
 
     private class TagFilter(
         name: String,
@@ -208,13 +176,8 @@ class Mugua : Source() {
         private const val PREF_LATEST_CATEGORY_KEY = "latest_category"
         private const val DEFAULT_LATEST_CATEGORY = ""
 
-        private val OBFUSCATED_SCRIPT_REGEX =
-            """eval\s*\(\s*I\(\s*["']([\s\S]*?)["']\s*\)\s*\)""".toRegex()
-        private val PLAYER_VIDEO_URL_REGEX =
-            """video\s*:\s*\{\s*url\s*:\s*["']([^"']+\.m3u8(?:\?[^"']*)?)["']""".toRegex(RegexOption.IGNORE_CASE)
-
         private val CATEGORIES = arrayOf(
-            "全部" to "",
+            "首頁" to "",
             "国产精品" to "5y9kg97rdzxe",
             "国产自拍" to "649e2zxgw10p",
         )
