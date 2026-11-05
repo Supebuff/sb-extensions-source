@@ -32,3 +32,5 @@ JVM tests are in the module's `test/` directory and cover parsing, pagination, r
 ```
 
 This documentation review did not repeat Mugua device tests. Device results for X1hub do not establish Mugua playback, settings, or download compatibility. Shared CI and signing operations are documented in [docs/CI.md](../../../docs/CI.md).
+
+Documentation-only edits to this README or recognized files in the module's `docs/` directory skip APK building and signing in normal `changed` scope, while workflow lint and CI regression tests still run. Mixed code/resource/build changes remain eligible for building, and manual `added` scope can still build all fork-added extensions. See [documentation selection rules](../../../docs/CI.md#documentation-only-changes).
