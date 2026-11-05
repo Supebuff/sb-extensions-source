@@ -16,6 +16,7 @@ CI_PATHS = (
     ".github/workflows/build_push.yml",
     ".github/scripts/ci-matrix.py",
     ".github/scripts/sign-apks.py",
+    ".github/scripts/publish-repo.py",
     ".github/signing-certificate.sha256",
     ".github/scripts/generate-build-matrices.py",
     ".github/tests/",

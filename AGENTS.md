@@ -10,8 +10,9 @@
 
 - `dev`：自有套件及 CI 修改的主要分支。
 - `upstream`：同步 `salmanbappi/sb-extensions-source` 的 `master`，保持上游內容；自有改動放在 `dev`，上游更新合併至 `dev`。
-- 保護 `dev` 與 `upstream`；保留使用者尚未提交的修改，避免覆寫工作區、強制推送或改寫既有歷史。
-- 自動分支清理保留 `main`、`master`、`dev`、`upstream`，空值也略過；其他名稱先驗證，再精確刪除對應的 `refs/heads/`。保護規則位於 `.github/workflows/delete_merged_branch.yml`，回歸測試位於 `.github/tests/test_branch_cleanup.py`。
+- `repo`：專用發布分支，放固定簽名 Release APK、圖示與 AniZen 相容索引，由成功 CI 更新。
+- 保護 `dev`、`upstream` 與 `repo`；保留使用者尚未提交的修改，避免覆寫工作區、強制推送或改寫既有歷史。
+- 自動分支清理保留 `main`、`master`、`dev`、`upstream`、`repo`，空值也略過；其他名稱先驗證，再精確刪除對應的 `refs/heads/`。保護規則位於 `.github/workflows/delete_merged_branch.yml`，回歸測試位於 `.github/tests/test_branch_cleanup.py`。
 - 保留共用函式庫、開發範本及發布工具，供後續新增套件使用。大範圍精簡需有明確需求與依賴檢查。
 
 ## 先讀哪些檔案
@@ -45,7 +46,8 @@
 - 私鑰、密碼與 Secret 全文不得寫入程式庫、日誌、對話、快取或公開產物；倉庫外的金鑰備份也不能當作普通暫存清除。
 - 簽名必須通過 APK 驗證，且所有簽名憑證符合固定指紋。格式解析失敗時查明工具差異並補驗證，不更換金鑰或略過指紋檢查。
 - 提供使用者安裝的是 **`signed-apks-*`**；`unsigned-apks-*` 是中間產物，`test-only-apks-*` 僅供測試。
-- 目前只交付 CI 產物，尚未建立本 fork 的獨立套件索引發布庫。README 的上游安裝連結不代表已發布自有套件。
+- 成功的 `dev` 簽名建置會再驗證並發布至 `repo`；README Automatic／Manual Link 都加入本 fork 的套件庫。使用同倉庫 `GITHUB_TOKEN`，只在發布 job 給 `contents: write`，不新增私鑰 Secret。
+- `.github/scripts/publish-repo.py` 只接受 fork 新增模組，合併部分更新時保留其他套件；同版號保留原檔、拒絕降版。新程式行為必須遞增版本。純文件 CI 略過建置、簽名與發布。
 
 ## 驗證與交付
 

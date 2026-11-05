@@ -101,7 +101,7 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 ## 合併後的分支清理（2026-11-05）
 
 - [工作流程](../.github/workflows/delete_merged_branch.yml)僅處理已合併、來源分支在同一倉庫的 PR；保留原有事件條件。
-- 刪除步驟以精確名稱保留 `main`、`master`、`dev`、`upstream`；空值或未設定分支名稱也略過。其他名稱通過 `git check-ref-format` 後，只刪除完整 `refs/heads/<名稱>`，避免與其他 ref 混淆。
+- 刪除步驟以精確名稱保留 `main`、`master`、`dev`、`upstream`、`repo`；空值或未設定分支名稱也略過。其他名稱通過 `git check-ref-format` 後，只刪除完整 `refs/heads/<名稱>`，避免與其他 ref 混淆。
 - [回歸測試](../.github/tests/test_branch_cleanup.py)在獨立暫存目錄攔截 Git 呼叫，覆蓋保護分支、空值、功能分支、相似名稱、字元轉義、無效名稱及刪除失敗回報；不連線或刪除遠端分支。
 - 主 CI 的 actionlint 同時檢查建置與清理工作流程，unittest discover 會執行清理回歸測試。這是工作流程層的保護；GitHub 倉庫 ruleset／分支保護設定是另一層管理設定。
 
@@ -118,6 +118,14 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 - 原先沒有模組專屬 launcher 圖示，因此使用 `core/` 的共用書籤圖片。16.6 在木瓜的 `res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png` 提供 48／72／96／144／192 px 的透明 PNG，以模組資源優先序覆蓋共用圖片。
 - 採用使用者提供的 32×32 PNG data URL 紅白圖示，保留圖案與 alpha 通道；僅以 Lanczos 縮放及 PNG 優化匯出。放大不增加原圖細節，不推定圖片的商標或授權歸屬。
 - 版本遞增至 16.6，保持套件／來源 ID、網址與固定簽名不變；沒有調整網路、解析及播放實作。圖片尺寸／透明度、APK 打包與實體手機顯示應分開記錄驗證結果，裝置顯示仍待確認。
+
+## Automatic 套件庫發布（2026-11-05）
+
+- `dev` 成功建置、固定簽名後，獨立發布 job 再驗證 APK，將圖示、APK、`index.min.json`／`index.json`／`repo.json` 與公開校驗資料推送到同倉庫 `repo` 分支。README 一鍵加入與手動網址均指向本 fork。
+- 核對 AniZen 0.5.220 `ExtensionRepoService`：陣列索引會讀取旁邊 `repo.json` 的 `meta`，採用 legacy 列表、語言及相對 APK／圖示路徑。採用此相容格式，不要求 Protobuf 或新增執行期依賴。`sources` 為可選空列表，沒有猜測來源 ID。
+- 發布沿用固定憑證；只允許 fork 新增模組，拒絕 Debug、錯誤套件／憑證與降版。同版號保留已發布檔案；部分建置合併時保留其餘套件，移除的來源於下次成功發布清理。
+- 只在發布 job 給 `contents: write`，使用內建 `GITHUB_TOKEN`，不傳簽名 Secret；一般文件、PR 與非 dev 建置不發布。發布失敗不能得到成功的 CI result。`repo` 同時加入自動分支清理保護。
+- 初次導入未修改木瓜／X1hub 程式或版號；建置、HTTP／索引及手機加入安裝是不同驗證層級，實體手機 Automatic 流程待確認。操作與檔案契約見 [CI 文件](CI.md#automatic-installation-and-publication)。
 
 ## 共通待辦
 

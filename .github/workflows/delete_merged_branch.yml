@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           case "${BRANCH_NAME:-}" in
-            ""|main|master|dev|upstream)
+            ""|main|master|dev|upstream|repo)
               echo "Skipping protected or empty branch"
               ;;
             *)

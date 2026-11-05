@@ -1,14 +1,12 @@
 <div align="center">
 
-# Extensions Source
+# Supebuff Extensions
 
 A collection of extension catalogues for compatible Android anime players.
 
-| Install Repo | Build Status | Discord |
+| Install Repo | Build Status | Upstream Discord |
 |:------------:|:------------:|:-------:|
-| [![Install](https://img.shields.io/badge/Click%20here%20to%20install%20repo-gray?style=flat&labelColor=red)](https://intradeus.github.io/http-protocol-redirector/?r=anizen://add-repo?url=https://raw.githubusercontent.com/salmanbappi/extensions-repo/main/index.min.json) | ![CI](https://github.com/salmanbappi/sb-extensions-source/actions/workflows/build_push.yml/badge.svg) | [![Discord](https://img.shields.io/discord/1377136877491982366.svg?label=&labelColor=6A7EC2&color=7389D8&logo=discord&logoColor=FFFFFF)](https://discord.gg/85MZhUX688) |
-
-![Visitor Count](https://count.getloli.com/get/@salmanbappi?theme=capoo-2)
+| [![Install](https://img.shields.io/badge/Click%20here%20to%20install%20repo-gray?style=flat&labelColor=red)](https://intradeus.github.io/http-protocol-redirector/?r=anizen%3A%2F%2Fadd-repo%3Furl%3Dhttps%3A%2F%2Fraw.githubusercontent.com%2FSupebuff%2Fsb-extensions-source%2Frepo%2Findex.min.json) | ![CI](https://github.com/Supebuff/sb-extensions-source/actions/workflows/build_push.yml/badge.svg?branch=dev) | [![Discord](https://img.shields.io/discord/1377136877491982366.svg?label=&labelColor=6A7EC2&color=7389D8&logo=discord&logoColor=FFFFFF)](https://discord.gg/85MZhUX688) |
 
 </div>
 
@@ -16,20 +14,24 @@ A collection of extension catalogues for compatible Android anime players.
 
 This repository contains the source code for various anime extensions.
 
+本 fork 的套件庫為 **Supebuff Extensions**，提供木瓜、X1hub 與後續新增的自有套件。`dev` 維護原始碼，`upstream` 同步上游，`repo` 發布通過固定簽名驗證的 APK、圖示與索引。
+
 ## 🚀 How to Add the Repository
 
 ### Option 1: Automatic
-Click the **"Click here to install repo"** button in the table above if you are on a compatible device with an extension installer.
+在已安裝 **AniZen 0.5.220** 的 Android 手機點擊上方 **Click here to install repo**，允許瀏覽器開啟 AniZen，再確認加入 **Supebuff Extensions**。回到套件列表重新整理，即可安裝木瓜／X1hub；之後可在 App 內檢查更新。
+
+Automatic 會帶入套件庫網址，仍需在 App 確認並選擇要安裝的套件。若瀏覽器未開啟 App，請使用下方 Manual Link。從本 fork 固定簽名 APK 更新可保留既有安裝；較早使用其他簽名的 APK 仍有一次性簽名轉換限制，見 [CI 說明](docs/CI.md#one-time-fixed-signing-setup)。
 
 ### Option 2: Manual Link
 Copy and paste the repository URL into your app's extension settings:
 
 ```text
-https://raw.githubusercontent.com/salmanbappi/extensions-repo/main/index.min.json
+https://raw.githubusercontent.com/Supebuff/sb-extensions-source/repo/index.min.json
 ```
 
 ### Option 3: Direct APK Download
-If you prefer manual APK installation, download the compiled files directly from the [`repo` branch](https://github.com/salmanbappi/extensions-repo/tree/repo/apk) of the repository.
+需要直接安裝 APK 時，可從本倉庫 [`repo` 分支的 apk 目錄](https://github.com/Supebuff/sb-extensions-source/tree/repo/apk)下載。該分支只發布驗證成功的固定簽名 Release APK，無須下載 Actions 壓縮檔；套件版本遞增且 CI 發布成功後，索引會自動更新。
 
 ---
 

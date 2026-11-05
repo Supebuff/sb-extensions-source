@@ -70,7 +70,7 @@ class BranchCleanupTests(unittest.TestCase):
             return result, calls
 
     def test_protected_and_empty_branches_never_call_git(self):
-        for branch in ("main", "master", "dev", "upstream", "", None):
+        for branch in ("main", "master", "dev", "upstream", "repo", "", None):
             with self.subTest(branch=branch):
                 result, calls = self.run_cleanup(branch)
                 self.assertEqual(result.returncode, 0, result.stderr)

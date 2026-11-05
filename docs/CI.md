@@ -12,7 +12,8 @@ For source-specific implementation differences, troubleshooting evidence, and de
 - Run each selected extension's JVM unit tests and the existing core JVM unit tests in the first build chunk.
 - Build unsigned Release APKs on trusted `dev` pushes/manual runs. Sign them in a separate job using a fixed key, verify their signatures and the pinned certificate, then upload verified APKs.
 - PRs and manual runs on other branches build Debug APKs for testing and never receive signing credentials.
-- Require a successful `CI result` check, including signing when required; failed or cancelled builds cannot produce a passing result.
+- Publish verified APKs, launcher icons and the AniZen-compatible catalogue to the dedicated `repo` branch after trusted `dev` signing succeeds.
+- Require a successful `CI result` check, including signing and publication when required; failed or cancelled builds cannot produce a passing result.
 
 Changes are compared against the push's previous commit, or the pull request's base commit. Missing history or a missing upstream reference fails explicitly. A first push with no previous commit builds only fork-added extensions. Libraries required by those extensions are still compiled as dependencies.
 
@@ -26,11 +27,11 @@ The fork's `ci-matrix.py` filters documentation paths before module/dependency s
 
 Matching is by location as well as suffix. Packaged files under `src/`, `res/`, or `assets/`, and test fixtures, are not excluded just because they use a documentation extension. Build files and manifests remain build inputs. Mixed changes select the modules affected by the remaining code/resource/build paths. Both sides of renames are considered, so renaming code into a README still selects its module.
 
-For documentation-only pushes/PRs in `changed` scope, workflow lint and CI regression tests still run. An empty matrix sets `has_build=false`; APK tests/builds and release signing are skipped, and `CI result` requires successful validation. Manual `added` scope and first-push fallback still build all fork-added extensions. The standalone upstream matrix helper keeps its default behavior; the fork passes its filtered file list explicitly.
+For documentation-only pushes/PRs in `changed` scope, workflow lint and CI regression tests still run. An empty matrix sets `has_build=false`; APK tests/builds, release signing and publication are skipped, and `CI result` requires successful validation. Manual `added` scope and first-push fallback still build all fork-added extensions. The standalone upstream matrix helper keeps its default behavior; the fork passes its filtered file list explicitly.
 
 ## Merged branch cleanup
 
-[Delete Merged Branch](../.github/workflows/delete_merged_branch.yml) runs only for merged pull requests whose head branch belongs to this repository. The deletion step always skips `main`, `master`, `dev`, `upstream`, and empty/unset branch names. Other names must pass `git check-ref-format`; deletion targets the exact `refs/heads/<name>` ref, and a failed deletion fails the job.
+[Delete Merged Branch](../.github/workflows/delete_merged_branch.yml) runs only for merged pull requests whose head branch belongs to this repository. The deletion step always skips `main`, `master`, `dev`, `upstream`, `repo`, and empty/unset branch names. Other names must pass `git check-ref-format`; deletion targets the exact `refs/heads/<name>` ref, and a failed deletion fails the job.
 
 Regression tests in [.github/tests/test_branch_cleanup.py](../.github/tests/test_branch_cleanup.py) execute the workflow's shell block with intercepted Git calls in an isolated directory. They verify protected names, normal feature branches, quoting, invalid refs, and failure propagation without deleting a remote branch. The main CI lints both the build and cleanup workflows and discovers these tests with the existing unittest command.
 
@@ -47,7 +48,23 @@ Download **`signed-apks-<run>`** from the run's **Artifacts** section for instal
 
 `unsigned-apks-<run>-<chunk>` is an intermediate artifact and cannot be installed as an update. `test-only-apks-<run>-<chunk>` uses temporary Debug signatures and is for PR/non-dev testing only. Both are retained for 14 days. Failure reports are retained for 7 days.
 
-CI builds, tests, and signs artifacts. It does not publish GitHub releases, update an extension repository, change version codes, or commit formatting changes.
+## Automatic installation and publication
+
+The README Automatic button opens `anizen://add-repo?url=...` through the existing HTTPS protocol redirector. Both Automatic and Manual Link add:
+
+```text
+https://raw.githubusercontent.com/Supebuff/sb-extensions-source/repo/index.min.json
+```
+
+On AniZen 0.5.220 the array index resolves `repo.json` metadata, including the pinned signing fingerprint. This fork publishes the compatible legacy JSON catalogue (`index.min.json`, `index.json`, `repo.json`), PNG icons and signed Release APKs. The optional `sources` field is empty: runtime IDs are not guessed or changed. Catalogue language, version, content warning, package and icon come from the APK. This does not change the installed source's ID or functionality.
+
+After signing, a separate trusted `dev` job downloads only `signed-apks-<run>`, verifies all incoming and retained APKs against the pinned certificate, and merges affected packages into `repo`. Fork-added modules are discovered against `origin/upstream`; unrelated upstream APKs are rejected. Other published packages remain available. A lower version fails; an equal version keeps the existing APK immutable. Increment `extVersionCode` to publish code changes. Removed modules are pruned on the next successful nonempty publication.
+
+The publisher prepares the complete snapshot before updating files and pushes a normal fast-forward commit. A push failure fails CI; no forced history replacement is used. Only the publication job has `contents: write`; build/sign jobs and PR checks retain read-only repository access. Publication uses the same repository's `GITHUB_TOKEN` and receives no private signing Secret. The protected `repo` branch is initialized once with a README before the first run, and thereafter is maintained by CI. No additional PAT or repository is needed.
+
+`SHA256SUMS` and `SIGNING_CERTIFICATE_SHA256.txt` are public verification data. APK installation remains subject to Android confirmation and AniZen's trust/settings. Existing APKs signed with the same fixed key can update when a higher version is available. Browser deep-link opening and in-app installation require phone verification; HTTP/index/build checks alone do not prove that flow.
+
+Documentation-only pushes skip build/sign/publication. PRs and non-dev runs never publish. A required publication failure fails `CI result`. CI does not create GitHub releases, change module versions or commit formatting changes. Public files in `repo` are independent of expiring Actions artifacts.
 
 ## One-time fixed signing setup
 
