@@ -2,6 +2,8 @@
 
 The `CI` workflow runs for pushes to `dev`, pull requests targeting `dev`, and manual runs from the Actions tab. The `upstream` branch remains a mirror of the upstream repository.
 
+For source-specific implementation differences, troubleshooting evidence, and device verification status, see [Extension technical notes](EXTENSION_NOTES.md). CI behavior and signing operations remain documented here.
+
 ## Automatic checks
 
 - Validate the workflow with actionlint and run the offline CI selector regression tests.

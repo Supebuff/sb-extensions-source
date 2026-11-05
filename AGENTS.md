@@ -17,6 +17,7 @@
 ## 先讀哪些檔案
 
 - [docs/CI.md](docs/CI.md)：建置範圍、正式簽名、產物與操作方式。
+- [docs/EXTENSION_NOTES.md](docs/EXTENSION_NOTES.md)：各來源的技術差異、共通流程、踩坑證據及裝置驗證狀態。
 - [development_guide.md](development_guide.md)、[CONTRIBUTING.md](CONTRIBUTING.md)：專案結構與開發慣例；其中舊路徑、數量或上游連結須以實際檔案核對。
 - [common.gradle](common.gradle)、[settings.gradle.kts](settings.gradle.kts)、[gradle/libs.versions.toml](gradle/libs.versions.toml)：模組、來源集、編譯依賴與版本。
 - `src/<語言>/<來源>/`：各套件；依來源需求選用 `core/`、`lib/`、`lib-multisrc/` 的既有功能。
@@ -62,5 +63,5 @@
 
 ## 跨對話延續
 
-- 將來源專屬的行為與限制寫入該套件 README，CI 操作寫入 `docs/CI.md`；此檔只保留長期適用的專案規則。
+- 將來源專屬的行為與限制寫入該套件 README；技術決策、踩坑原因與手機回報摘要同步至 `docs/EXTENSION_NOTES.md`，註明日期、版本、證據及仍待確認的部分。CI 操作寫入 `docs/CI.md`；此檔只保留長期適用的專案規則。
 - 文件記錄重要決策及可查證的檔案／提交／CI 參考，避免堆積完整對話、重複日誌或過期狀態。

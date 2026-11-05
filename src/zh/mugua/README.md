@@ -1,5 +1,7 @@
 # Mugua
 
+Current module: `src/zh/mugua`, version **16.5**, targeting AniZen 0.5.220. For implementation differences, shared development checks, and troubleshooting evidence, see [Extension technical notes](../../../docs/EXTENSION_NOTES.md).
+
 ## 16.5: request protection and feature list
 
 The source settings now show a read-only **功能列表**, protection scope, and a **同一主機請求間隔** selector (0.5 seconds by default; 1 or 2 seconds optional). Requests to each hostname are spaced independently, including redirect destinations. The interval applies to listings, search, details, playback-page resolution, and covers downloaded in local compatibility mode.
@@ -14,8 +16,19 @@ These protections reduce request bursts; they do not guarantee that a website wi
 
 Enable **本機縮圖相容模式** in the source settings (enabled by default), then refresh the source list. On the affected AniZen version, direct cover requests can lose source headers, and the image server rejects requests without the site's Referer.
 
-In compatibility mode, the extension downloads covers with its own request headers and returns app-private local file paths. Downloads are limited to four at a time, reuse existing files, reject non-image responses, and cap individual images at 2 MiB. The image cache keeps approximately 64 MiB; small URL metadata records allow evicted images to be restored when source details are refreshed. Files are excluded from Android backups.
+In compatibility mode, the extension downloads covers with its own request headers and returns app-private local file paths. The original 16.4 implementation allowed four concurrent downloads; current 16.5 limits this to two. Downloads reuse existing files, reject non-image responses, and cap individual images at 2 MiB. The image cache keeps approximately 64 MiB; small URL metadata records allow evicted images to be restored when source details are refreshed. Files are excluded from Android backups.
 
 The first list load may take longer. No app replacement, third-party image proxy, or app-data reset is required. Existing library entries can be refreshed through their source details to adopt local covers.
 
 If the app's cover loader is fixed later, turn compatibility mode off and refresh the source list to use direct image URLs again.
+
+## Development checks
+
+JVM tests are in the module's `test/` directory and cover parsing, pagination, request cooldowns, cancellation, and the local cover cache. Run:
+
+```sh
+./gradlew :src:zh:mugua:testDebugUnitTest :core:testDebugUnitTest
+./gradlew :src:zh:mugua:assembleRelease -PunsignedRelease=true
+```
+
+This documentation review did not repeat Mugua device tests. Device results for X1hub do not establish Mugua playback, settings, or download compatibility. Shared CI and signing operations are documented in [docs/CI.md](../../../docs/CI.md).

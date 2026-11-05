@@ -4,6 +4,8 @@
 > **授權**：Apache License 2.0 | **作者**：salmanbappi
 > **技術棧**：Kotlin · Android · Gradle (Groovy + KTS) · OkHttp · Jsoup · kotlinx.serialization
 
+本 fork 的維護入口為 [AGENTS.md](AGENTS.md)、[插件技術與踩坑紀錄](docs/EXTENSION_NOTES.md)及 [CI 文件](docs/CI.md)。先讀木瓜與 X1hub 的現行實作／實測差異，再依來源選用功能；本指南中的上游範例、路徑、版本與發布方式須以目前程式碼核對。
+
 ---
 
 ## 目錄
@@ -676,7 +678,7 @@ override val client = network.client.newBuilder()
 | ✅ Regex 定義在 class 層級 | 避免每次呼叫重新編譯 |
 | ✅ SimpleDateFormat 定義為 class 常數 | 建立開銷大 |
 | ✅ 用 `buildString {}` | 代替 `StringBuilder()` |
-| ✅ 回傳 `emptyList()` 而非拋例外 | 讓 App 顯示本地化錯誤 |
+| ✅ 區分正常空結果與解析／網路失敗 | 真正無結果可回傳空列表；失敗應回報可理解的錯誤，並保留協程取消語意 |
 | ❌ 不要加冗餘註解 | 保持程式碼自文檔化 |
 | ❌ 不要加語言後綴到 `name` | App 已按語言分組 |
 
