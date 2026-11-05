@@ -12,8 +12,17 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import extensions.utils.Source
 import extensions.utils.get
 import keiyoushi.utils.addListPreference
+import keiyoushi.utils.addSwitchPreference
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import okhttp3.CacheControl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import java.io.File
 import java.io.IOException
 
 class Mugua : Source() {
@@ -27,6 +36,8 @@ class Mugua : Source() {
     override val supportsLatest = true
 
     private val pageUrls = mutableMapOf<String, MutableMap<Int, String>>()
+    private val coverSlots = Semaphore(4)
+    private val coverCache by lazy { MuguaCoverCache(File(context.noBackupFilesDir, "mugua-covers")) }
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
@@ -70,13 +81,18 @@ class Mugua : Source() {
         val listing = client.get(url, headers).use { response ->
             MuguaParser.listing(response.body.string(), response.request.url.toString(), page)
         }
-        val items = listing.items.map { item ->
-            SAnime.create().apply {
-                title = item.title
-                setUrlWithoutDomain(item.url)
-                thumbnail_url = item.thumbnail
-                fetch_type = FetchType.Episodes
-            }
+        val items = coroutineScope {
+            listing.items.map { item ->
+                async {
+                    val cover = compatibleThumbnail(item.thumbnail)
+                    SAnime.create().apply {
+                        title = item.title
+                        setUrlWithoutDomain(item.url)
+                        thumbnail_url = cover
+                        fetch_type = FetchType.Episodes
+                    }
+                }
+            }.awaitAll()
         }
         synchronized(pageUrls) {
             if (page == 1) pageUrls.remove(listingUrl)
@@ -95,10 +111,11 @@ class Mugua : Source() {
         val details = client.get(absoluteUrl(anime.url), headers).use { response ->
             MuguaParser.details(response.body.string(), response.request.url.toString())
         }
+        val cover = compatibleThumbnail(details?.thumbnail ?: anime.thumbnail_url)
         return SAnime.create().apply {
             title = details?.title ?: anime.title
             url = anime.url
-            thumbnail_url = details?.thumbnail ?: anime.thumbnail_url
+            thumbnail_url = cover
             description = "單集 HLS 播放。"
             fetch_type = FetchType.Episodes
             initialized = true
@@ -143,6 +160,12 @@ class Mugua : Source() {
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        screen.addSwitchPreference(
+            key = PREF_LOCAL_COVERS,
+            default = true,
+            title = "本機縮圖相容模式",
+            summary = "修正部分 App 無法載入封面的問題。首次載入較慢，最多保留約 64 MB；切換後請重新整理列表。",
+        )
         screen.addListPreference(
             key = PREF_LATEST_CATEGORY_KEY,
             default = DEFAULT_LATEST_CATEGORY,
@@ -151,6 +174,25 @@ class Mugua : Source() {
             entries = CATEGORIES.map { it.first },
             entryValues = CATEGORIES.map { it.second },
         )
+    }
+
+    private suspend fun compatibleThumbnail(url: String?): String? {
+        if (url == null) return null
+        val original = try {
+            withContext(Dispatchers.IO) { coverCache.originalUrl(url) }
+        } catch (_: IOException) {
+            return url
+        }
+        if (!preferences.getBoolean(PREF_LOCAL_COVERS, true) || original.startsWith("file://")) return original
+        return coverSlots.withPermit {
+            try {
+                withContext(Dispatchers.IO) { coverCache.find(original) } ?: client.get(original, headers).use { response ->
+                    withContext(Dispatchers.IO) { coverCache.put(original, response.body.byteStream()) }
+                }
+            } catch (_: IOException) {
+                original
+            }
+        }
     }
 
     private fun tagListingUrl(tag: String): String = if (tag.isBlank()) {
@@ -174,6 +216,7 @@ class Mugua : Source() {
 
     companion object {
         private const val PREF_LATEST_CATEGORY_KEY = "latest_category"
+        private const val PREF_LOCAL_COVERS = "local_cover_compatibility"
         private const val DEFAULT_LATEST_CATEGORY = ""
 
         private val CATEGORIES = arrayOf(
