@@ -8,7 +8,7 @@ For source-specific implementation differences, troubleshooting evidence, and de
 
 - Validate the workflow with actionlint and run the offline CI selector regression tests.
 - Build APKs only for extensions added by this fork, identified by comparing module build files with `origin/upstream`. Currently these are `zh/mugua` and `all/x1hub`; newly added modules are discovered automatically.
-- Within that scope, select affected extensions and transitive dependents. Core, build configuration, and CI changes rebuild fork-added extensions without building the upstream catalog. Documentation-only or upstream-extension-only changes skip APK builds.
+- Within that scope, select affected extensions and transitive dependents. Core, build configuration, and CI changes rebuild fork-added extensions without building the upstream catalog. Changes limited to root documentation or `docs/`, and upstream-extension-only changes, skip APK builds. Documentation inside `src/<lang>/<source>/` currently selects that extension just like a source edit, so a module README change can still trigger tests, APK building, and trusted-dev signing.
 - Run each selected extension's JVM unit tests and the existing core JVM unit tests in the first build chunk.
 - Build unsigned Release APKs on trusted `dev` pushes/manual runs. Sign them in a separate job using a fixed key, verify their signatures and the pinned certificate, then upload verified APKs.
 - PRs and manual runs on other branches build Debug APKs for testing and never receive signing credentials.

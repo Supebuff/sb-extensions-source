@@ -39,7 +39,7 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 3. 用少量樣本確認列表、搜尋、分類、分頁、詳情、集數及媒體流程。來源設定要說明支援功能與節流範圍。
 4. JVM 測試放在模組 `test/` 並設定來源集。純文件變更依 AGENTS 檢查內容、引用與 `git diff --check`，不必重建 APK。
 5. 程式變更執行該模組 JVM 測試及 APK 建置；共用程式變更另驗證相依來源與 core。線上樣本檢查、APK 建置／簽名、手機實測分開回報。
-6. 確認變更範圍後提交／推送，查看實際 CI 選取模組與最終結果。純文件 CI 可能略過建置；不要因此聲稱重新驗證了 APK 或手機。
+6. 確認變更範圍後提交／推送，查看實際 CI 選取模組與最終結果。根目錄／docs 的純文件 CI 可略過建置；模組內 README 目前仍會選取該插件。依實際任務回報，不因文件 CI 通過就聲稱手機已重新驗證。
 7. 交付簽名產物、提交與 CI 連結。純文件更新不遞增套件版號；交付程式更新時各自遞增 `extVersionCode`，沿用固定金鑰。
 
 建置與簽名命令以 [CI 文件](CI.md)為準。更換模組任務時，例如木瓜 `:src:zh:mugua:testDebugUnitTest`、X1hub `:src:all:x1hub:testDebugUnitTest`，兩者共用 `:core:testDebugUnitTest`。
@@ -100,6 +100,7 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 
 ## 共通待辦
 
+- CI 文件選取：本次文件 CI #14 實際選中了兩個來源；[get_module_list](../.github/scripts/generate-build-matrices.py)依模組路徑匹配，尚未排除模組 README。[選取器測試](../.github/tests/test_ci_matrix.py)的 docs-only 案例目前只覆蓋根目錄 README。根目錄／docs 可略過，模組內文件仍可能建置／簽名；後續若改善，需一起加入模組 README 的回歸測試。本次校正文件，不修改選取器。
 - 分支清理：[delete_merged_branch.yml](../.github/workflows/delete_merged_branch.yml)目前只排除 main/master，仍需在處理該流程時補上 dev/upstream 保護；本次只記錄，未修改工作流程。此狀態亦列於 AGENTS。
 - HTTP／節流共用：兩來源目前各自維護實作。若日後抽成共用模組，需明確檢查依賴、保留來源專屬縮圖邏輯，並一起驗證兩個來源與 core；目前未進行抽取。
 
