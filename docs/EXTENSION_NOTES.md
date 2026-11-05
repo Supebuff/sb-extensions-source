@@ -91,6 +91,10 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 - 版本遞增至 16.2，保留套件／來源 ID 與已儲存作品／集數網址。手機待測：行動數據／Wi-Fi 雙向切換及續播、切換後拖曳／畫質切換、長時間與到期後恢復、下載及外部播放器；16.1 的已知樣本結果保留於下表。
 - 驗證結果：2026-11-06，[提交 5db636e](https://github.com/Supebuff/sb-extensions-source/commit/5db636ee234e6a618b39afe4434b1456d5d4568e)的 [CI #22](https://github.com/Supebuff/sb-extensions-source/actions/runs/42129100222)通過來源與 core JVM 測試、Release 建置、固定簽名及套件庫發布，索引為 X1hub 16.2。以 JDK 17／OkHttp JVM 5.3.2 直接執行相同 `LiveSiteTest` 亦通過：四種列表各 24 + 24 筆，720p／480p 都解析到不同的最終網址，並能再次取得 HTTP 206 與前 1024 bytes 的 MP4 ftyp；手機切網路結果仍待確認。
 
+- 後續手機結果（2026-11-06）：使用者確認 16.2 已更新且重新開播，影片 53587 在未切網路前即失敗；日誌 07:33:48 有 `contradictionary STSC and STCO`／`error reading header`，07:34:09 有 `mbedtls_ssl_read returned -0x0` 與再次讀取標頭失敗。外部播放器持續轉圈，WebView 網站播放器有閃退回報；日誌保留的 00:07:29 SIGTRAP 是前份已有事件，不能當作本次新閃退證據。沒有新的 CloudflareBypassException，也不代表驗證問題已排除。
+- 同片 HTTP 對照：720p／480p 的 CDN 均回傳 206，最初 64 KiB 與一般 GET 的前段相同；兩畫質約 4.7 MB 的 moov 索引均完整讀取並檢查，兩軌的 stsc 最後 first_chunk 均未超過 stco chunk_count，未重現 FFmpeg 報出的條件。第二輪共讀約 9.7 MB 標頭／索引，未下載完整影片；這只代表開發端當時的回應，不證明手機端或整部影片正常。
+- 網站流程核對：KVS 5.5.1 播放器在開播入口加上新的 `rnd`，插件目前未加入；但本次有／無 rnd 的入口均為 302、`CF-Cache-Status: DYNAMIC`、`Cache-Control: no-store, no-cache, must-revalidate`，沒有證據顯示缺少 rnd 造成這次失敗，因此未據此修改或發布新 APK。優先取得同手機、同網路的獨立 Chrome／Samsung Internet 播放結果；WebView 閃退與媒體讀取失敗可能需要分開追查，16.2 尚不能列為無感恢復已通過。
+
 以下為 2026-11-05 使用者回報，並於 2026-11-06 補充網路切換結果；宿主 AniZen 0.5.220、Android 16、來源 16.1。不代表全片庫或所有網路環境。
 
 | 項目 | 證據與結果 | 狀態／後續 |
