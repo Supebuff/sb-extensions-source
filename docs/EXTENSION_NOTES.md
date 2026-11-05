@@ -81,7 +81,7 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 
 ### 手機回報與處理結果
 
-以下為 2026-11-05 使用者回報，宿主 AniZen 0.5.220、Android 16、來源 16.1；不代表全片庫或所有網路環境。
+以下為 2026-11-05 使用者回報，並於 2026-11-06 補充網路切換結果；宿主 AniZen 0.5.220、Android 16、來源 16.1。不代表全片庫或所有網路環境。
 
 | 項目 | 證據與結果 | 狀態／後續 |
 | --- | --- | --- |
@@ -90,7 +90,8 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 | 下載到 100% 未完成 | 日誌在 Downloader.finalizeDownload 出現 Operation not permitted 與 Could not create destination file | 重新授權原 AniZen 儲存位置後，使用者確認正常。此案例屬 App 儲存收尾／授權問題，未修改來源媒體解析 |
 | 切畫質／拖曳轉圈較久 | 使用者確認沒有同時下載，決定再試、先觀察 | 原因未定；不歸因於網站限流、播放器或插件，也不先修改參數 |
 | 搜尋分頁特殊字元 | 程式目前以分號拆分網站參數；含分號的搜尋字串有截斷風險 | 僅程式碼審查風險，尚未在有下一頁的實站樣本重現；未列為已確認故障 |
-| 其他手機範圍 | 成人篩選、設定頁、縮圖、持續分頁、長時間播放、重啟／切網路、連結到期、背景播放與投放未逐項確認 | 保留待測，不沿用其他通過項目的結論 |
+| 行動數據切至 Wi-Fi（2026-11-06） | 使用者確認切換後播放失敗，需進 WebView 完成網站驗證才恢復；同次日誌有圖片載入器的 CloudflareBypassException 及媒體開啟失敗，但沒有對應媒體 HTTP 狀態碼 | 已確認觸發條件與手動恢復流程；優先追查新網路下的驗證／Cookie 流程。尚未證實媒體網址綁定 IP，也不能據此解釋同份日誌中的 WebView 原生崩潰或集數重複插入；未修改解析、播放器或版號 |
+| 其他手機範圍 | 成人篩選、設定頁、縮圖、持續分頁、長時間播放、重啟、其他網路切換方向與自動恢復、連結到期、背景播放與投放未逐項確認 | 保留待測，不沿用其他通過項目的結論 |
 
 下載錯誤的判讀曾對照 [AniZen 0.5.220 的 finalizeDownload](https://github.com/salmanbappi/AniZen/blob/v0.5.220/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt)與[儲存位置授權流程](https://github.com/salmanbappi/AniZen/blob/v0.5.220/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDataScreen.kt)。只記錄必要錯誤摘要，不提交原始手機日誌或截圖。
 
