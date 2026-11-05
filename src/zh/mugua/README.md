@@ -1,6 +1,12 @@
 # Mugua
 
-Current module: `src/zh/mugua`, version **16.5**, targeting AniZen 0.5.220. For implementation differences, shared development checks, and troubleshooting evidence, see [Extension technical notes](../../../docs/EXTENSION_NOTES.md).
+Current module: `src/zh/mugua`, version **16.6**, targeting AniZen 0.5.220. For implementation differences, shared development checks, and troubleshooting evidence, see [Extension technical notes](../../../docs/EXTENSION_NOTES.md).
+
+## 16.6: dedicated launcher icon
+
+Mugua now uses the red-and-white icon supplied by the repository owner as a 32 × 32 PNG data URL. It is resized with Lanczos interpolation to the five Android launcher densities (48, 72, 96, 144, and 192 px), preserving its design and alpha channel. Upscaling does not add source detail. The module's `res/mipmap-*/ic_launcher.png` resources override the shared core icon through Android resource merging. The shared icon and other extensions' icons are unchanged.
+
+This is an icon and version update. Source/package identity, catalogue URLs, network behavior, and the fixed signing key are preserved. APK resource contents and CI results are checked separately from the icon's appearance on a physical device, which remains pending verification.
 
 ## 16.5: request protection and feature list
 
@@ -16,7 +22,7 @@ These protections reduce request bursts; they do not guarantee that a website wi
 
 Enable **本機縮圖相容模式** in the source settings (enabled by default), then refresh the source list. On the affected AniZen version, direct cover requests can lose source headers, and the image server rejects requests without the site's Referer.
 
-In compatibility mode, the extension downloads covers with its own request headers and returns app-private local file paths. The original 16.4 implementation allowed four concurrent downloads; current 16.5 limits this to two. Downloads reuse existing files, reject non-image responses, and cap individual images at 2 MiB. The image cache keeps approximately 64 MiB; small URL metadata records allow evicted images to be restored when source details are refreshed. Files are excluded from Android backups.
+In compatibility mode, the extension downloads covers with its own request headers and returns app-private local file paths. The original 16.4 implementation allowed four concurrent downloads; 16.5 and later limit this to two. Downloads reuse existing files, reject non-image responses, and cap individual images at 2 MiB. The image cache keeps approximately 64 MiB; small URL metadata records allow evicted images to be restored when source details are refreshed. Files are excluded from Android backups.
 
 The first list load may take longer. No app replacement, third-party image proxy, or app-data reset is required. Existing library entries can be refreshed through their source details to adopt local covers.
 

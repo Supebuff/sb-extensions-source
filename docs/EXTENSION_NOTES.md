@@ -18,9 +18,9 @@
 
 | 項目／檔案 | 木瓜 | X1hub | 後續做法 |
 | --- | --- | --- | --- |
-| 模組／版本 | `src/zh/mugua`；16.5 | `src/all/x1hub`；16.1 | 保留各自名稱、語言、套件 ID、來源 ID 與儲存網址；版本獨立遞增 |
+| 模組／版本 | `src/zh/mugua`；16.6 | `src/all/x1hub`；16.1 | 保留各自名稱、語言、套件 ID、來源 ID 與儲存網址；版本獨立遞增 |
 | `build.gradle` | 套用 `common.gradle`；正式來源 `src/`、測試 `test/` | 相同；另有實站測試環境開關輸入 | 維持測試來源集與依賴規範一致；有實站測試才加入開關 |
-| `AndroidManifest.xml`、`res/` | 沿用來源 manifest；允許明文連線 | 來源 manifest；提供網站 favicon 衍生圖示 | 檢查套件類別、成人標記、圖示及備份設定；依站點需求決定明文連線 |
+| `AndroidManifest.xml`、`res/` | 沿用來源 manifest；允許明文連線；16.6 新增使用者提供的紅白專屬圖示 | 來源 manifest；提供網站 favicon 衍生圖示 | 檢查套件類別、成人標記、圖示及備份設定；依站點需求決定明文連線 |
 | 解析與播放 | JSP 列表／不透明分頁；DPlayer 明文或 XOR 0x80 腳本中的 HLS | KVS 列表、搜尋／分類 AJAX 分頁；`flashvars` 與 `function/0` MP4 | 解析器與測試樣本依來源維護，不共用網站選擇器與解碼器 |
 | HTTP／節流 | `MuguaHttpClient.kt`、`MuguaRequestPolicy.kt` | `HttpClient.kt`、`RequestPolicy.kt` | 同步檢查取消、重新導向、敏感標頭、Retry-After、無限重試；有意義的來源差異保留 |
 | 請求設定 | 0.5／1／2 秒；頁面快取允許 10 分鐘 | 0.5／1／2 秒；頁面快取允許 5 分鐘 | 基本保護原則一致；快取時間依來源獨立評估，播放頁均強制重新取得 |
@@ -112,6 +112,12 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 - 邊界：僅依已知文件位置與格式排除，不全域忽略 `.md`／`.txt`；`src/`、`res/`、`assets/`、測試資料、manifest 與建置設定仍納入。混合修改依實際程式變更選模組；比較時停用 rename 合併，保留改名前後路徑，避免把「程式改名成 README」當成純文件。
 - [回歸測試](../.github/tests/test_ci_matrix.py)使用實際 Git 提交樣本，涵蓋模組／共用函式庫說明、混合修改、資源與測試資料、文件新增／修改／刪除／改名，以及空矩陣的 `has_build=false`。手動 `added` 與首次推送 fallback 仍可完整建置。
 - CI 仍執行工作流程 lint 與回歸測試；空矩陣時略過 APK 測試／建置與簽名。完整辨識位置及格式以 [CI 文件](CI.md)為準。
+
+## 木瓜 16.6 圖示更新（2026-11-05）
+
+- 原先沒有模組專屬 launcher 圖示，因此使用 `core/` 的共用書籤圖片。16.6 在木瓜的 `res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png` 提供 48／72／96／144／192 px 的透明 PNG，以模組資源優先序覆蓋共用圖片。
+- 採用使用者提供的 32×32 PNG data URL 紅白圖示，保留圖案與 alpha 通道；僅以 Lanczos 縮放及 PNG 優化匯出。放大不增加原圖細節，不推定圖片的商標或授權歸屬。
+- 版本遞增至 16.6，保持套件／來源 ID、網址與固定簽名不變；沒有調整網路、解析及播放實作。圖片尺寸／透明度、APK 打包與實體手機顯示應分開記錄驗證結果，裝置顯示仍待確認。
 
 ## 共通待辦
 
