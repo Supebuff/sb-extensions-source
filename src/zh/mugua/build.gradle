@@ -1,7 +1,7 @@
 ext {
     extName = 'Mugua'
     extClass = '.Mugua'
-    extVersionCode = 4
+    extVersionCode = 5
     isNsfw = true
 }
 
@@ -18,4 +18,5 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.jsoup)
     testImplementation(libs.okhttp)
+    testImplementation(libs.coroutines.core)
 }

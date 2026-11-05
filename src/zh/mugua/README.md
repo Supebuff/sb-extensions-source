@@ -1,5 +1,15 @@
 # Mugua
 
+## 16.5: request protection and feature list
+
+The source settings now show a read-only **功能列表**, protection scope, and a **同一主機請求間隔** selector (0.5 seconds by default; 1 or 2 seconds optional). Requests to each hostname are spaced independently, including redirect destinations. The interval applies to listings, search, details, playback-page resolution, and covers downloaded in local compatibility mode.
+
+HTTP 429 and HTTP 503 with `Retry-After` pause new requests to that host. Both delay-seconds and HTTP-date values are accepted; a longer server deadline is preserved. Missing or invalid 429 delays start at 30 seconds and increase on repeated blocks, up to 15 minutes. There is no automatic HTTP-status retry loop: page requests report the remaining wait immediately, while cover requests leave the cover blank. Waits for normal request spacing are cancellable.
+
+Local cover downloads are limited to two at a time. Network failures, HTTP errors, and invalid images pause retries for that URL for five minutes. Concurrent loads of the same URL share the cache/failure decision, and cached images remain usable during cooldowns. Failed covers return no remote URL, preventing the app from immediately retrying outside this policy. Refresh the list after the cooldown to try missing covers again. Cooldown and failed-cover records are in memory and reset when the source is recreated; image files remain persistent.
+
+These protections reduce request bursts; they do not guarantee that a website will allow access. Remote images with local compatibility disabled, player buffering, media segments, and app-managed downloads remain under the app's control. The source ID, catalogue URLs, and existing library entries are unchanged. AniZen 0.5.220 is the compatibility target; Android device playback and settings rendering still require device verification.
+
 ## 16.4: cover compatibility for AniZen r-4821
 
 Enable **本機縮圖相容模式** in the source settings (enabled by default), then refresh the source list. On the affected AniZen version, direct cover requests can lose source headers, and the image server rejects requests without the site's Referer.
