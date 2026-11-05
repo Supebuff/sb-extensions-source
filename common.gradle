@@ -78,7 +78,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            if (!providers.gradleProperty("unsignedRelease").map { it.toBoolean() }.getOrElse(false)) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
         }
     }

@@ -50,7 +50,7 @@ jobs:
           printf '%s  %s\n' "$ACTIONLINT_SHA256" "$archive" | sha256sum --check
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color .github/workflows/build_push.yml
-      - name: Test module selection
+      - name: Test CI selection and signing
         run: python -m unittest discover -s .github/tests -v
       - name: Select build modules
         id: plan
@@ -83,24 +83,31 @@ jobs:
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: ${{ github.event_name == 'pull_request' }}
-      - name: Build debug APKs and run extension and core tests
+      - name: Build APKs and run extension and core tests
         env:
           BUILD_TASKS: ${{ toJSON(matrix.chunk.modules) }}
           CHUNK_NUMBER: ${{ matrix.chunk.number }}
+          RELEASE_BUILD: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/dev' }}
         run: |
-          mapfile -t tasks < <(python3 -c 'import json, os; print("\n".join(json.loads(os.environ["BUILD_TASKS"])))')
-          for task in "${tasks[@]}"; do
+          mapfile -t selected < <(python3 -c 'import json, os; print("\n".join(json.loads(os.environ["BUILD_TASKS"])))')
+          tasks=()
+          for task in "${selected[@]}"; do
+            if [[ "$RELEASE_BUILD" == true ]]; then
+              tasks+=("${task%:assembleDebug}:assembleRelease")
+            else
+              tasks+=("$task")
+            fi
             tasks+=("${task%:assembleDebug}:testDebugUnitTest")
           done
           if [[ "$CHUNK_NUMBER" == 1 ]]; then
             tasks+=(":core:testDebugUnitTest")
           fi
-          bash ./gradlew "${tasks[@]}" --no-daemon --continue --stacktrace --max-workers=2 -Dorg.gradle.jvmargs=-Xmx3g -Pkotlin.compiler.execution.strategy=in-process
-      - name: Upload debug APKs
+          bash ./gradlew "${tasks[@]}" -PunsignedRelease=true --no-daemon --continue --stacktrace --max-workers=2 -Dorg.gradle.jvmargs=-Xmx3g -Pkotlin.compiler.execution.strategy=in-process
+      - name: Upload build artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: debug-apks-${{ github.run_number }}-${{ matrix.chunk.number }}
-          path: src/**/build/outputs/apk/debug/*.apk
+          name: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/dev' && 'unsigned-apks' || 'test-only-apks' }}-${{ github.run_number }}-${{ matrix.chunk.number }}
+          path: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/dev' && 'src/**/build/outputs/apk/release/*-unsigned.apk' || 'src/**/build/outputs/apk/debug/*.apk' }}
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -115,10 +122,47 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  sign:
+    name: Sign and verify release APKs
+    needs: [prepare, build]
+    if: needs.prepare.outputs.has_build == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          java-version: '17'
+          distribution: temurin
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: unsigned-apks-${{ github.run_number }}-*
+          path: ${{ runner.temp }}/unsigned-apks
+      - name: Sign with the fixed key and verify the pinned certificate
+        env:
+          EXTENSION_SIGNING: ${{ secrets.EXTENSION_SIGNING }}
+        run: |
+          apksigner=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
+          [[ -n "$apksigner" ]]
+          python .github/scripts/sign-apks.py --input "$RUNNER_TEMP/unsigned-apks" --output "$RUNNER_TEMP/signed-apks" --apksigner "$apksigner"
+      - name: Upload verified release APKs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-apks-${{ github.run_number }}
+          path: ${{ runner.temp }}/signed-apks/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
   result:
     name: CI result
     if: always()
-    needs: [prepare, build]
+    needs: [prepare, build, sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -126,11 +170,16 @@ jobs:
         env:
           PREPARE_RESULT: ${{ needs.prepare.result }}
           BUILD_RESULT: ${{ needs.build.result }}
+          SIGN_RESULT: ${{ needs.sign.result }}
+          SIGN_REQUIRED: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/dev' }}
           HAS_BUILD: ${{ needs.prepare.outputs.has_build }}
         run: |
           [[ "$PREPARE_RESULT" == success ]]
           if [[ "$HAS_BUILD" == true ]]; then
             [[ "$BUILD_RESULT" == success ]]
+            if [[ "$SIGN_REQUIRED" == true ]]; then
+              [[ "$SIGN_RESULT" == success ]]
+            fi
           else
             [[ "$BUILD_RESULT" == skipped ]]
           fi

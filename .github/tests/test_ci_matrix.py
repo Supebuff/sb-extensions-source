@@ -54,6 +54,14 @@ class MatrixTests(unittest.TestCase):
         self.commit()
         self.assertEqual(self.tasks(), [])
 
+    def test_signer_and_certificate_changes_rebuild_added_extensions(self):
+        for path in (".github/scripts/sign-apks.py", ".github/signing-certificate.sha256"):
+            with self.subTest(path=path):
+                base = ci.git("rev-parse", "HEAD")
+                self.write(path)
+                self.commit()
+                self.assertEqual(self.tasks(base=base), [":src:zh:mugua:assembleDebug"])
+
     def test_source_change_selects_only_affected_extension(self):
         self.write("src/zh/mugua/src/Mugua.kt")
         self.commit()

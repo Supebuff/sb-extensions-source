@@ -17,3 +17,9 @@ __pycache__/
 *.pyc
 scratch/
 /scripts/
+
+# Private APK signing material must stay outside the public checkout.
+*.jks
+*.keystore
+*.p12
+EXTENSION_SIGNING.json
