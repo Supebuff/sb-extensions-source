@@ -40,8 +40,11 @@ class LiveSiteTest {
             val streams = Parser.streams(html, video.url)
             assertTrue(streams.isNotEmpty())
             for (stream in streams.take(2)) {
-                val rangeHeaders = headers.newBuilder().set("Referer", video.url).set("Range", "bytes=0-1023").build()
-                http.get(stream.url, rangeHeaders).use { response ->
+                val media = MediaResolver(http).resolve(stream.url, headers.newBuilder().set("Referer", video.url).build())
+                assertTrue(media.headers["Range"] == null)
+                println("Live media resolution: ${stream.label}, redirect resolved=${media.url != stream.url}, MP4 prefix verified")
+                val rangeHeaders = media.headers.newBuilder().set("Range", "bytes=0-1023").build()
+                http.get(media.url, rangeHeaders).use { response ->
                     assertTrue("Expected byte-range response", response.code == 206)
                     assertTrue("Expected MP4 content", response.header("Content-Type").orEmpty().startsWith("video/"))
                     val bytes = response.body.source().readByteArray(1024)

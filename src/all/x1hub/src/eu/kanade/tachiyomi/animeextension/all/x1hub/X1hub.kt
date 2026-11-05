@@ -113,6 +113,11 @@ class X1hub : Source() {
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> = videos(episode.url)
 
+    override suspend fun resolveVideo(video: Video): Video {
+        val media = MediaResolver(http).resolve(video.videoUrl, video.headers ?: headers)
+        return video.copy(videoUrl = media.url, headers = media.headers)
+    }
+
     private suspend fun videos(url: String): List<Video> = http.get(absoluteUrl(url), headers, CacheControl.FORCE_NETWORK).use { response ->
         val pageUrl = response.request.url.toString()
         val videoHeaders = headers.newBuilder().set("Referer", pageUrl).build()
@@ -134,6 +139,7 @@ class X1hub : Source() {
                 "• 常用分類：搜尋文字留空時套用。\n" +
                 "• 影片詳情、分類／標籤及單集播放。\n" +
                 "• 公開 MP4 畫質：開播時重新取得連結，排除登入跳轉。\n" +
+                "• 選定畫質後解析最終媒體網址，減少播放經過網站驗證入口。\n" +
                 "• 網站頁面請求間隔與限流冷卻。",
         )
         screen.addListPreference(
