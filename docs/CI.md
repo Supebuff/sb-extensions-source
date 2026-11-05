@@ -8,13 +8,25 @@ For source-specific implementation differences, troubleshooting evidence, and de
 
 - Validate the build and merged-branch cleanup workflows with actionlint, and run offline CI selection, signing, and branch cleanup regression tests.
 - Build APKs only for extensions added by this fork, identified by comparing module build files with `origin/upstream`. Currently these are `zh/mugua` and `all/x1hub`; newly added modules are discovered automatically.
-- Within that scope, select affected extensions and transitive dependents. Core, build configuration, and CI changes rebuild fork-added extensions without building the upstream catalog. Changes limited to root documentation or `docs/`, and upstream-extension-only changes, skip APK builds. Documentation inside `src/<lang>/<source>/` currently selects that extension just like a source edit, so a module README change can still trigger tests, APK building, and trusted-dev signing.
+- Within that scope, select affected extensions and transitive dependents. Core, build configuration, and CI changes rebuild fork-added extensions without building the upstream catalog. The normal `changed` scope excludes documentation in the locations below; documentation-only and upstream-extension-only changes skip APK builds.
 - Run each selected extension's JVM unit tests and the existing core JVM unit tests in the first build chunk.
 - Build unsigned Release APKs on trusted `dev` pushes/manual runs. Sign them in a separate job using a fixed key, verify their signatures and the pinned certificate, then upload verified APKs.
 - PRs and manual runs on other branches build Debug APKs for testing and never receive signing credentials.
 - Require a successful `CI result` check, including signing when required; failed or cancelled builds cannot produce a passing result.
 
 Changes are compared against the push's previous commit, or the pull request's base commit. Missing history or a missing upstream reference fails explicitly. A first push with no previous commit builds only fork-added extensions. Libraries required by those extensions are still compiled as dependencies.
+
+## Documentation-only changes
+
+The fork's `ci-matrix.py` filters documentation paths before module/dependency selection in `changed` scope. It recognizes:
+
+- Repository-root `.md`, `.markdown`, `.rst`, and `.adoc` files, plus the repository `docs/` tree.
+- Those text formats directly inside extension roots (`src/<lang>/<source>/`), library roots (`lib/<name>/`, `lib-multisrc/<name>/`), `core/`, `buildSrc/`, `utils/`, `gradle/`, and `gradle/build-logic/`.
+- A `docs/` directory directly inside those roots: the same text formats, `.txt`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, and `.pdf`. Other file types remain eligible for build selection.
+
+Matching is by location as well as suffix. Packaged files under `src/`, `res/`, or `assets/`, and test fixtures, are not excluded just because they use a documentation extension. Build files and manifests remain build inputs. Mixed changes select the modules affected by the remaining code/resource/build paths. Both sides of renames are considered, so renaming code into a README still selects its module.
+
+For documentation-only pushes/PRs in `changed` scope, workflow lint and CI regression tests still run. An empty matrix sets `has_build=false`; APK tests/builds and release signing are skipped, and `CI result` requires successful validation. Manual `added` scope and first-push fallback still build all fork-added extensions. The standalone upstream matrix helper keeps its default behavior; the fork passes its filtered file list explicitly.
 
 ## Merged branch cleanup
 

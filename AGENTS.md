@@ -37,6 +37,7 @@
 ## CI 與固定簽名
 
 - 目前 CI 以 `origin/upstream` 辨識本 fork 新增的模組，新增來源可自動納入。一般推送只選受影響的新增模組及所需依賴，不建置全部上游套件。
+- 一般 `changed` 範圍依 `docs/CI.md` 的位置規則排除純說明文件，包含模組 README；不可因副檔名而全域忽略程式資源或測試資料。手動 `added` 範圍仍建置所有本 fork 新增模組。
 - 修改上游既有模組時，另外確認並執行該模組的驗證，避免把 CI 未選取的模組說成已通過。
 - 主要流程位於 `.github/workflows/build_push.yml`；選取器與簽名程式位於 `.github/scripts/`，其測試位於 `.github/tests/`。
 - `dev` 的正式建置先產生 unsigned Release APK，再由獨立工作簽名；PR 測試不接觸正式簽名 Secret。

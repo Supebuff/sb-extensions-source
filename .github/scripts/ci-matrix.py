@@ -4,7 +4,7 @@ import argparse
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 
 HELPER_PATH = Path(__file__).with_name("generate-build-matrices.py")
@@ -20,6 +20,36 @@ CI_PATHS = (
     ".github/scripts/generate-build-matrices.py",
     ".github/tests/",
 )
+
+DOCUMENTATION_SUFFIXES = {".md", ".markdown", ".rst", ".adoc"}
+DOCUMENTATION_ASSET_SUFFIXES = DOCUMENTATION_SUFFIXES | {
+    ".txt", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".pdf",
+}
+
+
+def is_documentation_path(path):
+    """Recognize documentation locations without excluding packaged files or fixtures."""
+    parts = PurePosixPath(path).parts
+    suffix = PurePosixPath(path).suffix.lower()
+    if len(parts) == 1:
+        return suffix in DOCUMENTATION_SUFFIXES
+    if parts[0] == "docs":
+        return True
+
+    if parts[0] == "src" and len(parts) >= 4:
+        relative = parts[3:]
+    elif parts[0] in {"lib", "lib-multisrc"} and len(parts) >= 3:
+        relative = parts[2:]
+    elif parts[:2] == ("gradle", "build-logic"):
+        relative = parts[2:]
+    elif parts[0] in {"core", "buildSrc", "utils", "gradle"}:
+        relative = parts[1:]
+    else:
+        return False
+
+    if len(relative) == 1:
+        return suffix in DOCUMENTATION_SUFFIXES
+    return bool(relative) and relative[0] == "docs" and suffix in DOCUMENTATION_ASSET_SUFFIXES
 
 
 def git(*args):
@@ -46,9 +76,12 @@ def plan(scope, base, upstream_ref="origin/upstream"):
     else:
         # Fail on missing history instead of silently checking the wrong commit.
         resolved = git("rev-parse", "--verify", "--end-of-options", base + "^{commit}")
-        changed = git("diff", "--name-only", resolved, "HEAD").splitlines()
+        # Include both sides of renames: moving code into a documentation path still builds.
+        changed = [path for path in git(
+            "diff", "--name-only", "--no-renames", resolved, "HEAD",
+        ).splitlines() if not is_documentation_path(path)]
         os.environ["IS_PR_CHECK"] = "true"
-        modules, _ = upstream.get_module_list(resolved)
+        modules, _ = upstream.get_module_list(resolved, changed_files=changed)
         if any(path.startswith(CI_PATHS) for path in changed):
             modules = set(modules) | added
 

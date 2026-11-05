@@ -39,7 +39,7 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 3. 用少量樣本確認列表、搜尋、分類、分頁、詳情、集數及媒體流程。來源設定要說明支援功能與節流範圍。
 4. JVM 測試放在模組 `test/` 並設定來源集。純文件變更依 AGENTS 檢查內容、引用與 `git diff --check`，不必重建 APK。
 5. 程式變更執行該模組 JVM 測試及 APK 建置；共用程式變更另驗證相依來源與 core。線上樣本檢查、APK 建置／簽名、手機實測分開回報。
-6. 確認變更範圍後提交／推送，查看實際 CI 選取模組與最終結果。根目錄／docs 的純文件 CI 可略過建置；模組內 README 目前仍會選取該插件。依實際任務回報，不因文件 CI 通過就聲稱手機已重新驗證。
+6. 確認變更範圍後提交／推送，查看實際 CI 選取模組與最終結果。一般 `changed` 範圍會排除符合位置規則的純文件（包含模組 README）；手動 `added` 仍建置全部新增模組。依實際任務回報，不因文件 CI 通過就聲稱手機已重新驗證。
 7. 交付簽名產物、提交與 CI 連結。純文件更新不遞增套件版號；交付程式更新時各自遞增 `extVersionCode`，沿用固定金鑰。
 
 建置與簽名命令以 [CI 文件](CI.md)為準。更換模組任務時，例如木瓜 `:src:zh:mugua:testDebugUnitTest`、X1hub `:src:all:x1hub:testDebugUnitTest`，兩者共用 `:core:testDebugUnitTest`。
@@ -105,9 +105,16 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 - [回歸測試](../.github/tests/test_branch_cleanup.py)在獨立暫存目錄攔截 Git 呼叫，覆蓋保護分支、空值、功能分支、相似名稱、字元轉義、無效名稱及刪除失敗回報；不連線或刪除遠端分支。
 - 主 CI 的 actionlint 同時檢查建置與清理工作流程，unittest discover 會執行清理回歸測試。這是工作流程層的保護；GitHub 倉庫 ruleset／分支保護設定是另一層管理設定。
 
+## 純文件 CI 選取（2026-11-05）
+
+- 起因：文件 CI #14 仍選中了木瓜與 X1hub，因原選取器按模組路徑匹配，舊 docs-only 測試只覆蓋根目錄 README。
+- 修正：[ci-matrix.py](../.github/scripts/ci-matrix.py)在一般 `changed` 範圍先過濾根目錄、模組根目錄說明文件及對應 `docs/` 文件／圖片，再將明確檔案清單傳給 [get_module_list](../.github/scripts/generate-build-matrices.py)。上游輔助腳本未傳清單時的行為保留。
+- 邊界：僅依已知文件位置與格式排除，不全域忽略 `.md`／`.txt`；`src/`、`res/`、`assets/`、測試資料、manifest 與建置設定仍納入。混合修改依實際程式變更選模組；比較時停用 rename 合併，保留改名前後路徑，避免把「程式改名成 README」當成純文件。
+- [回歸測試](../.github/tests/test_ci_matrix.py)使用實際 Git 提交樣本，涵蓋模組／共用函式庫說明、混合修改、資源與測試資料、文件新增／修改／刪除／改名，以及空矩陣的 `has_build=false`。手動 `added` 與首次推送 fallback 仍可完整建置。
+- CI 仍執行工作流程 lint 與回歸測試；空矩陣時略過 APK 測試／建置與簽名。完整辨識位置及格式以 [CI 文件](CI.md)為準。
+
 ## 共通待辦
 
-- CI 文件選取：本次文件 CI #14 實際選中了兩個來源；[get_module_list](../.github/scripts/generate-build-matrices.py)依模組路徑匹配，尚未排除模組 README。[選取器測試](../.github/tests/test_ci_matrix.py)的 docs-only 案例目前只覆蓋根目錄 README。根目錄／docs 可略過，模組內文件仍可能建置／簽名；後續若改善，需一起加入模組 README 的回歸測試。本次校正文件，不修改選取器。
 - HTTP／節流共用：兩來源目前各自維護實作。若日後抽成共用模組，需明確檢查依賴、保留來源專屬縮圖邏輯，並一起驗證兩個來源與 core；目前未進行抽取。
 
 ## 新插件／新踩坑紀錄格式

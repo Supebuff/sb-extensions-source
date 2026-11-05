@@ -54,6 +54,129 @@ class MatrixTests(unittest.TestCase):
         self.commit()
         self.assertEqual(self.tasks(), [])
 
+    def test_extension_documentation_skips_build_but_manual_added_still_builds(self):
+        for path in (
+            "src/zh/mugua/README.md", "src/zh/mugua/CHANGELOG.rst",
+            "src/zh/mugua/docs/guide.md", "src/zh/mugua/docs/images/example.png",
+            "docs/EXTENSION_NOTES.md", "AGENTS.md",
+        ):
+            with self.subTest(path=path):
+                self.write(path)
+                self.commit()
+                self.assertEqual(self.tasks(), [])
+        self.assertEqual(self.tasks(scope="added"), [":src:zh:mugua:assembleDebug"])
+
+    def test_shared_module_documentation_does_not_rebuild_dependents(self):
+        self.write("lib/base/build.gradle", "")
+        self.write("lib-multisrc/theme/build.gradle.kts", "")
+        self.write("src/zh/mugua/build.gradle",
+                   "implementation(project(':lib:base'))\next { themePkg = 'theme' }\n")
+        self.commit()
+        base = ci.git("rev-parse", "HEAD")
+        for path in (
+            "lib/base/README.md", "lib/base/docs/usage.adoc",
+            "lib-multisrc/theme/README.md", "core/README.md",
+            "core/docs/design.md", "gradle/build-logic/README.md",
+            "buildSrc/docs/design.md", "utils/README.md",
+        ):
+            with self.subTest(path=path):
+                self.write(path)
+                self.commit()
+                self.assertEqual(self.tasks(base=base), [])
+
+    def test_mixed_docs_and_code_selects_only_the_code_module(self):
+        self.write("src/zh/second/build.gradle", "")
+        self.commit()
+        base = ci.git("rev-parse", "HEAD")
+        self.write("src/zh/mugua/README.md")
+        self.write("src/zh/second/src/Second.kt")
+        self.commit()
+        self.assertEqual(self.tasks(base=base), [":src:zh:second:assembleDebug"])
+
+    def test_packaged_files_fixtures_and_build_inputs_are_not_documentation(self):
+        for path in (
+            "src/zh/mugua/assets/README.md", "src/zh/mugua/src/main/resources/help.md",
+            "src/zh/mugua/res/raw/guide.md", "src/zh/mugua/res/drawable/icon.svg",
+            "src/zh/mugua/test/fixtures/listing.md", "src/zh/mugua/AndroidManifest.xml",
+            "src/zh/mugua/proguard-rules.txt", "src/zh/mugua/docs/example.kt",
+            "src/zh/mugua/build.gradle",
+        ):
+            with self.subTest(path=path):
+                base = ci.git("rev-parse", "HEAD")
+                self.write(path)
+                self.commit()
+                self.assertEqual(self.tasks(base=base), [":src:zh:mugua:assembleDebug"])
+
+    def test_core_fixtures_and_ci_fixtures_with_doc_extensions_still_build(self):
+        for path in ("core/src/test/resources/README.md", "core/src/test/resources/data.txt",
+                     ".github/tests/fixtures/README.md"):
+            with self.subTest(path=path):
+                base = ci.git("rev-parse", "HEAD")
+                self.write(path)
+                self.commit()
+                self.assertEqual(self.tasks(base=base), [":src:zh:mugua:assembleDebug"])
+
+    def test_library_packaged_markdown_still_rebuilds_dependents(self):
+        self.write("lib/base/build.gradle", "")
+        self.write("src/zh/mugua/build.gradle", "implementation(project(':lib:base'))")
+        self.commit()
+        base = ci.git("rev-parse", "HEAD")
+        self.write("lib/base/src/main/assets/README.md")
+        self.commit()
+        self.assertEqual(self.tasks(base=base), [":src:zh:mugua:assembleDebug"])
+
+    def test_documentation_edits_renames_and_deletions_skip_build(self):
+        self.write("src/zh/mugua/README.md", "Original documentation\n")
+        self.commit()
+        base = ci.git("rev-parse", "HEAD")
+        self.write("src/zh/mugua/README.md", "Updated documentation\n")
+        self.commit()
+        self.assertEqual(self.tasks(base=base), [])
+        base = ci.git("rev-parse", "HEAD")
+        Path("src/zh/mugua/README.md").rename("src/zh/mugua/CHANGELOG.md")
+        self.commit()
+        self.assertEqual(self.tasks(base=base), [])
+        base = ci.git("rev-parse", "HEAD")
+        Path("src/zh/mugua/CHANGELOG.md").unlink()
+        self.commit()
+        self.assertEqual(self.tasks(base=base), [])
+
+    def test_renames_between_documentation_and_runtime_inputs_still_build(self):
+        runtime = Path("src/zh/mugua/src/Parser.kt")
+        readme = Path("src/zh/mugua/README.md")
+        self.write(str(runtime), "Same contents for rename detection\n")
+        self.commit()
+        base = ci.git("rev-parse", "HEAD")
+        runtime.rename(readme)
+        self.commit()
+        self.assertEqual(self.tasks(base=base), [":src:zh:mugua:assembleDebug"])
+        base = ci.git("rev-parse", "HEAD")
+        runtime.parent.mkdir(parents=True, exist_ok=True)
+        readme.rename(runtime)
+        self.commit()
+        self.assertEqual(self.tasks(base=base), [":src:zh:mugua:assembleDebug"])
+
+    def test_default_upstream_helper_keeps_unfiltered_behavior(self):
+        self.write("src/zh/mugua/README.md")
+        self.commit()
+        modules, _ = ci.upstream.get_module_list(self.base)
+        self.assertEqual(modules, [":src:zh:mugua"])
+        self.assertEqual(self.tasks(), [])
+
+    def test_docs_only_cli_emits_false_has_build_and_empty_matrix(self):
+        self.write("src/zh/mugua/README.md")
+        self.commit()
+        output = Path("output.txt").resolve()
+        summary = Path("summary.md").resolve()
+        environment = dict(os.environ, GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(summary))
+        subprocess.run([sys.executable, str(SCRIPT), "--scope", "changed", "--base", self.base,
+                        "--upstream", self.upstream],
+                       check=True, env=environment, capture_output=True)
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertEqual(values["has_build"], "false")
+        self.assertEqual(json.loads(values["matrix"]), {"chunk": []})
+        self.assertIn("APK build skipped", summary.read_text())
+
     def test_signer_and_certificate_changes_rebuild_added_extensions(self):
         for path in (".github/scripts/sign-apks.py", ".github/signing-certificate.sha256"):
             with self.subTest(path=path):

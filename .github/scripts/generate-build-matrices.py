@@ -90,7 +90,7 @@ def find_dependents_python(modified_libs: set[str]) -> set[str]:
         
     return dependent_modules
 
-def get_module_list(ref: str) -> tuple[list[str], list[str]]:
+def get_module_list(ref: str, changed_files: list[str] | None = None) -> tuple[list[str], list[str]]:
     if not ref or ref == "0000000000000000000000000000000000000000" or ref.strip() == "":
         ref = "HEAD~1"
 
@@ -100,7 +100,8 @@ def get_module_list(ref: str) -> tuple[list[str], list[str]]:
         fallback_res = subprocess.run("git rev-parse --verify HEAD~1", capture_output=True, text=True, shell=True)
         ref = "HEAD~1" if fallback_res.returncode == 0 else "HEAD"
 
-    changed_files = run_command(f"git diff --name-only {ref}").splitlines()
+    if changed_files is None:
+        changed_files = run_command(f"git diff --name-only {ref}").splitlines()
 
     modules = set()
     libs = set()
