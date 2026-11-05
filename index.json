@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Aniyomi: X1hub",
+    "pkg": "eu.kanade.tachiyomi.animeextension.all.x1hub",
+    "apk": "aniyomi-all.x1hub-v16.1-release.apk",
+    "lang": "all",
+    "code": 1,
+    "version": "16.1",
+    "nsfw": 1,
+    "contentWarning": 2,
+    "extensionLib": "16",
+    "sources": []
+  },
+  {
+    "name": "Aniyomi: Mugua",
+    "pkg": "eu.kanade.tachiyomi.animeextension.zh.mugua",
+    "apk": "aniyomi-zh.mugua-v16.6-release.apk",
+    "lang": "zh",
+    "code": 6,
+    "version": "16.6",
+    "nsfw": 1,
+    "contentWarning": 2,
+    "extensionLib": "16",
+    "sources": []
+  }
+]
