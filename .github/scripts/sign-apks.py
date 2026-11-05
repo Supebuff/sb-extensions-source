@@ -45,14 +45,24 @@ def expected_fingerprint(path):
 
 
 def verify_fingerprint(output, expected):
-    signers = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)\s*$', output, re.MULTILINE)
-    if len(signers) != 1 or signers[0].lower() != expected:
+    # SDK 37 uses scheme labels such as "V3.0 Signer:" instead of "Signer #1".
+    # One signer can be reported for several schemes; every certificate must match.
+    records = re.findall(
+        r'^(Signer #\d+|V[123]\.\d+ Signer(?: #\d+)?:) certificate SHA-256 digest: '
+        r'([0-9a-fA-F]{64})[ \t]*\r?$', output, re.MULTILINE,
+    )
+    counts = re.findall(r'^Number of signers: (\d+)[ \t]*\r?$', output, re.MULTILINE)
+    reported = re.findall(r'^.*certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$', output, re.MULTILINE)
+    valid = counts == ['1'] and records and len(records) == len(reported) and all(
+        digest.lower() == expected and all(number == '1' for number in re.findall(r'#(\d+)', label))
+        for label, digest in records
+    )
+    if not valid:
         # Certificate hashes are public. Report only hashes to distinguish a different
         # key from a new apksigner output format without logging private credentials.
-        reported = re.findall(r'^.*certificate SHA-256 digest: ([0-9a-fA-F]{64})\s*$', output, re.MULTILINE)
         raise SigningError(
             'APK signer does not match the pinned certificate; refusing to publish. '
-            f'Expected SHA256={expected}; recognized signers={len(signers)}; '
+            f'Expected SHA256={expected}; recognized certificate records={len(records)}; '
             f'reported certificate SHA256={",".join(reported) or "none"}.'
         )
 

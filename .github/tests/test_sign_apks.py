@@ -39,7 +39,7 @@ class SigningTests(unittest.TestCase):
             self.key_path = Path(command[command.index('--ks') + 1])
             self.assertEqual(self.key_path.read_bytes(), b'private-fixture')
             return ''
-        return f'Verifies\nSigner #1 certificate SHA-256 digest: {self.fingerprint}\n'
+        return f'Verifies\nNumber of signers: 1\nSigner #1 certificate SHA-256 digest: {self.fingerprint}\n'
 
     def sign(self, runner=None):
         return signing.sign_apks(self.input, self.output, self.pin, Path('/tools/apksigner'),
@@ -99,8 +99,35 @@ class SigningTests(unittest.TestCase):
             signing.verify_fingerprint(
                 f'Signer (SDK range) certificate SHA-256 digest: {self.fingerprint}\n', self.fingerprint,
             )
-        self.assertIn('recognized signers=0', str(error.exception))
+        self.assertIn('recognized certificate records=0', str(error.exception))
         self.assertIn('reported certificate SHA256=' + self.fingerprint, str(error.exception))
+
+    def test_sdk37_scheme_labels_are_supported_with_the_same_pinned_certificate(self):
+        signing.verify_fingerprint(
+            f'Number of signers: 1\nV3.0 Signer: certificate SHA-256 digest: {self.fingerprint}\n',
+            self.fingerprint,
+        )
+        signing.verify_fingerprint(
+            f'Number of signers: 1\r\nV2.0 Signer #1: certificate SHA-256 digest: {self.fingerprint}\r\n'
+            f'V3.0 Signer: certificate SHA-256 digest: {self.fingerprint.upper()}\r\n', self.fingerprint,
+        )
+
+    def test_sdk37_multiple_signers_or_unexpected_scheme_certificate_are_rejected(self):
+        for output in (
+            f'Number of signers: 2\nV3.0 Signer: certificate SHA-256 digest: {self.fingerprint}\n',
+            f'Number of signers: 1\nV2.0 Signer #2: certificate SHA-256 digest: {self.fingerprint}\n',
+            f'Number of signers: 1\nV3.0 Signer: certificate SHA-256 digest: {self.fingerprint}\n'
+            f'V3.1 Signer: certificate SHA-256 digest: {"b" * 64}\n',
+            f'Number of signers: 1\nV3.0 Signer: certificate SHA-256 digest: {self.fingerprint}\n'
+            f'Unknown Signer: certificate SHA-256 digest: {self.fingerprint}\n',
+        ):
+            with self.subTest(output_length=len(output)):
+                with self.assertRaises(signing.SigningError):
+                    signing.verify_fingerprint(output, self.fingerprint)
+
+    def test_missing_signer_count_is_rejected_even_if_a_digest_matches(self):
+        with self.assertRaises(signing.SigningError):
+            signing.verify_fingerprint(f'Signer #1 certificate SHA-256 digest: {self.fingerprint}\n', self.fingerprint)
 
     def test_tool_failure_cleans_key_and_publishes_nothing(self):
         def failing(command, env):
