@@ -6,7 +6,7 @@ For source-specific implementation differences, troubleshooting evidence, and de
 
 ## Automatic checks
 
-- Validate the workflow with actionlint and run the offline CI selector regression tests.
+- Validate the build and merged-branch cleanup workflows with actionlint, and run offline CI selection, signing, and branch cleanup regression tests.
 - Build APKs only for extensions added by this fork, identified by comparing module build files with `origin/upstream`. Currently these are `zh/mugua` and `all/x1hub`; newly added modules are discovered automatically.
 - Within that scope, select affected extensions and transitive dependents. Core, build configuration, and CI changes rebuild fork-added extensions without building the upstream catalog. Changes limited to root documentation or `docs/`, and upstream-extension-only changes, skip APK builds. Documentation inside `src/<lang>/<source>/` currently selects that extension just like a source edit, so a module README change can still trigger tests, APK building, and trusted-dev signing.
 - Run each selected extension's JVM unit tests and the existing core JVM unit tests in the first build chunk.
@@ -15,6 +15,12 @@ For source-specific implementation differences, troubleshooting evidence, and de
 - Require a successful `CI result` check, including signing when required; failed or cancelled builds cannot produce a passing result.
 
 Changes are compared against the push's previous commit, or the pull request's base commit. Missing history or a missing upstream reference fails explicitly. A first push with no previous commit builds only fork-added extensions. Libraries required by those extensions are still compiled as dependencies.
+
+## Merged branch cleanup
+
+[Delete Merged Branch](../.github/workflows/delete_merged_branch.yml) runs only for merged pull requests whose head branch belongs to this repository. The deletion step always skips `main`, `master`, `dev`, `upstream`, and empty/unset branch names. Other names must pass `git check-ref-format`; deletion targets the exact `refs/heads/<name>` ref, and a failed deletion fails the job.
+
+Regression tests in [.github/tests/test_branch_cleanup.py](../.github/tests/test_branch_cleanup.py) execute the workflow's shell block with intercepted Git calls in an isolated directory. They verify protected names, normal feature branches, quoting, invalid refs, and failure propagation without deleting a remote branch. The main CI lints both the build and cleanup workflows and discovers these tests with the existing unittest command.
 
 ## Manual runs and APKs
 

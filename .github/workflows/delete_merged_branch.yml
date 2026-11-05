@@ -20,10 +20,15 @@ jobs:
         env:
           BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          if [ "$BRANCH_NAME" != "main" ] && [ "$BRANCH_NAME" != "master" ]; then
-            echo "Deleting branch $BRANCH_NAME"
-            git push origin --delete "$BRANCH_NAME"
-          else
-            echo "Skipping deletion of main or master branch"
-          fi
+          case "${BRANCH_NAME:-}" in
+            ""|main|master|dev|upstream)
+              echo "Skipping protected or empty branch"
+              ;;
+            *)
+              git check-ref-format "refs/heads/$BRANCH_NAME" || exit 1
+              echo "Deleting branch $BRANCH_NAME"
+              git push origin --delete -- "refs/heads/$BRANCH_NAME"
+              ;;
+          esac

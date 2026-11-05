@@ -11,7 +11,7 @@
 - `dev`：自有套件及 CI 修改的主要分支。
 - `upstream`：同步 `salmanbappi/sb-extensions-source` 的 `master`，保持上游內容；自有改動放在 `dev`，上游更新合併至 `dev`。
 - 保護 `dev` 與 `upstream`；保留使用者尚未提交的修改，避免覆寫工作區、強制推送或改寫既有歷史。
-- 自動分支清理也必須保護上述分支。現有 `.github/workflows/delete_merged_branch.yml` 只排除 main/master，處理上游同步 PR 時需注意這個尚待修正的設定。
+- 自動分支清理保留 `main`、`master`、`dev`、`upstream`，空值也略過；其他名稱先驗證，再精確刪除對應的 `refs/heads/`。保護規則位於 `.github/workflows/delete_merged_branch.yml`，回歸測試位於 `.github/tests/test_branch_cleanup.py`。
 - 保留共用函式庫、開發範本及發布工具，供後續新增套件使用。大範圍精簡需有明確需求與依賴檢查。
 
 ## 先讀哪些檔案

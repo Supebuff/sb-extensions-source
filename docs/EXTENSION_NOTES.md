@@ -98,10 +98,16 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 
 來源操作與現行限制見 [X1hub README](../src/all/x1hub/README.md)。
 
+## 合併後的分支清理（2026-11-05）
+
+- [工作流程](../.github/workflows/delete_merged_branch.yml)僅處理已合併、來源分支在同一倉庫的 PR；保留原有事件條件。
+- 刪除步驟以精確名稱保留 `main`、`master`、`dev`、`upstream`；空值或未設定分支名稱也略過。其他名稱通過 `git check-ref-format` 後，只刪除完整 `refs/heads/<名稱>`，避免與其他 ref 混淆。
+- [回歸測試](../.github/tests/test_branch_cleanup.py)在獨立暫存目錄攔截 Git 呼叫，覆蓋保護分支、空值、功能分支、相似名稱、字元轉義、無效名稱及刪除失敗回報；不連線或刪除遠端分支。
+- 主 CI 的 actionlint 同時檢查建置與清理工作流程，unittest discover 會執行清理回歸測試。這是工作流程層的保護；GitHub 倉庫 ruleset／分支保護設定是另一層管理設定。
+
 ## 共通待辦
 
 - CI 文件選取：本次文件 CI #14 實際選中了兩個來源；[get_module_list](../.github/scripts/generate-build-matrices.py)依模組路徑匹配，尚未排除模組 README。[選取器測試](../.github/tests/test_ci_matrix.py)的 docs-only 案例目前只覆蓋根目錄 README。根目錄／docs 可略過，模組內文件仍可能建置／簽名；後續若改善，需一起加入模組 README 的回歸測試。本次校正文件，不修改選取器。
-- 分支清理：[delete_merged_branch.yml](../.github/workflows/delete_merged_branch.yml)目前只排除 main/master，仍需在處理該流程時補上 dev/upstream 保護；本次只記錄，未修改工作流程。此狀態亦列於 AGENTS。
 - HTTP／節流共用：兩來源目前各自維護實作。若日後抽成共用模組，需明確檢查依賴、保留來源專屬縮圖邏輯，並一起驗證兩個來源與 core；目前未進行抽取。
 
 ## 新插件／新踩坑紀錄格式
