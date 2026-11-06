@@ -71,6 +71,8 @@ CI 會自動辨識此新增模組，執行 JVM 測試、Release 建置、固定�
 
 開發差異、技術細節與踩坑紀錄見 [插件技術與踩坑紀錄](../../../docs/EXTENSION_NOTES.md)。
 
+外部驗證服務仍在評估；[FlareSolverr／Scrapling 比較與多插件共用規劃](../../../docs/X1HUB_CLOUDFLARE_OPTIONS.md)記錄共用網關、背景執行需求與 X1hub 試點順序。目前尚未接入服務或提供服務位址設定，亦未決定部署常駐電腦／NAS。
+
 ## 文件維護
 
 僅修改本 README 或本模組 `docs/` 下符合 CI 辨識規則的文件時，一般推送／PR 的 `changed` 範圍仍執行工作流程 lint 與 CI 回歸測試，略過 APK 建置及簽名。程式、打包資源、測試資料或建置設定若一起修改，仍依受影響模組建置；手動 `added` 範圍可完整驗證新增來源。辨識格式與位置見 [CI 文件](../../../docs/CI.md#documentation-only-changes)。
