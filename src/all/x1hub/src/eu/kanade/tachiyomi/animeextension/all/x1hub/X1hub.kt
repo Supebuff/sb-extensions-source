@@ -120,7 +120,9 @@ class X1hub : Source() {
 
     private suspend fun videos(url: String): List<Video> = http.get(absoluteUrl(url), headers, CacheControl.FORCE_NETWORK).use { response ->
         val pageUrl = response.request.url.toString()
-        val videoHeaders = headers.newBuilder().set("Referer", pageUrl).build()
+        val videoHeaders = headers.newBuilder().set("Referer", pageUrl).apply {
+            response.requestOnWire.header("User-Agent")?.let { set("User-Agent", it) }
+        }.build()
         Parser.streams(response.body.string(), pageUrl).mapIndexed { index, stream ->
             Video(videoUrl = stream.url, videoTitle = stream.label, headers = videoHeaders, preferred = index == 0)
         }

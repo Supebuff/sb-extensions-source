@@ -81,6 +81,14 @@ HTTP 與節流目前是各模組內的實作，尚未抽成共用函式庫。修
 
 ### 手機回報與處理結果
 
+#### 16.3 保留實際網路請求標頭（2026-11-06）
+
+- 手機對照：使用者確認同一影片 53587 在獨立瀏覽器下，Wi-Fi 與行動數據均可播放，AniZen 16.2 仍失敗。這是將調查重點轉向 App 請求／交接流程的證據，不代表已確認所有失敗都是同一原因。
+- 可重現的程式問題：AniZen 0.5.220 的 `NetworkHelper` 在 network interceptor 將 User-Agent 固定為驗證成功時的值；OkHttp 5.3.2 的 BridgeInterceptor 在外層 Response 放回網路攔截器之前的 request，實際請求保留在 `networkResponse.request`。舊 `HttpClient` 重新導向沿用原 request，`X1hub.videos` 沿用來源預設標頭，`MediaResolver` 只讀外層 request，可能把舊 User-Agent 帶到下一跳／播放器，也未帶入最終媒體主機已成功使用的 Cookie。
+- 修正：`HttpClient.kt` 的 `requestOnWire` 優先讀取 `networkResponse.request`，沒有此資訊時退回一般 request；影片頁、手動重新導向、媒體交接都保留該 User-Agent。原網站明確 Cookie／授權仍在跨主機時移除，播放器只取得最後媒體主機成功請求使用的 Cookie，不複製網路層全部標頭或探測 Range／Host；未更動宿主或新增驗證器。
+- 回歸證據：新增 2 個測試分別重現「驗證後 UA 在重新導向變回舊值」及「媒體交接讀錯 UA／遺失最終主機 Cookie」。原碼兩項失敗，修正後 37 項離線測試通過，另 1 項實站測試需手動啟用。以 `X1HUB_LIVE_VIDEO_URL` 指定影片 53587 的實站測試通過四種列表分頁與 720p／480p 最終網址、MP4 開頭、再次 Range 讀取及縮圖；未下載完整影片，也不等同 Android 起播或切網路已通過。
+- 核對來源：[AniZen NetworkHelper](https://github.com/salmanbappi/AniZen/blob/v0.5.220/core/common/src/main/kotlin/eu/kanade/tachiyomi/network/NetworkHelper.kt)及 [OkHttp 5.3.2 官方 sources JAR](https://repo.maven.apache.org/maven2/com/squareup/okhttp3/okhttp-jvm/5.3.2/okhttp-jvm-5.3.2-sources.jar)內的 BridgeInterceptor／CacheInterceptor。保留套件／來源 ID 與作品／集數網址，版本遞增至 16.3；仍待同片內建／外部起播、雙向切網路、拖曳／畫質、下載與長時間／到期恢復的手機驗證。WebView 閃退需另查宿主，不宣稱本次修復。
+
 #### 16.2 最終媒體網址解析（2026-11-06）
 
 - 起因：16.1 使用者確認由行動數據切到 Wi-Fi 後，需進 WebView 驗證才能恢復播放。日誌顯示 MPV 直接開啟網站 `/get_file/` 入口失敗；媒體請求未經 AniZen 一般 OkHttp 的 Cloudflare 攔截器。

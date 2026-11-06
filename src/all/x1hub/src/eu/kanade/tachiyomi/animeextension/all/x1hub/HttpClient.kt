@@ -47,9 +47,11 @@ internal class HttpClient(
             }
             if (response.code in listOf(301, 302, 303, 307, 308)) {
                 val next = response.header("Location")?.let { request.url.resolve(it) }
+                val effectiveUserAgent = response.requestOnWire.header("User-Agent")
                 response.close()
                 if (next == null || redirects == 10) throw IOException("網站重新導向無效或次數過多。")
                 val builder = request.newBuilder().url(next)
+                effectiveUserAgent?.let { builder.header("User-Agent", it) }
                 if (next.host != request.url.host) {
                     builder.removeHeader("Authorization").removeHeader("Cookie").removeHeader("Proxy-Authorization")
                 }
@@ -78,3 +80,8 @@ internal class HttpClient(
         })
     }
 }
+
+// OkHttp's bridge restores its pre-network-interceptor request on the outer response.
+// AniZen pins the verified User-Agent in a network interceptor, so consult the wire request.
+internal val Response.requestOnWire: Request
+    get() = networkResponse?.request ?: request

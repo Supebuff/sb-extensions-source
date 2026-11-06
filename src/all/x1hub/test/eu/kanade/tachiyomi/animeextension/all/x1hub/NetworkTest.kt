@@ -92,6 +92,23 @@ class NetworkTest {
     }
 
     @Test
+    fun redirectRetainsTheUserAgentSelectedAtTheWireLayer() = runBlocking {
+        val http = http { chain ->
+            if (chain.request().url.host == "site.test") {
+                val wire = response(chain, 302, location = "https://cdn.test/media").newBuilder()
+                    .request(chain.request().newBuilder().header("User-Agent", "verified-UA").build())
+                    .body("".toResponseBody()).build()
+                response(chain, 302, location = "https://cdn.test/media").newBuilder().networkResponse(wire).build()
+            } else {
+                assertEquals("verified-UA", chain.request().header("User-Agent"))
+                assertNull(chain.request().header("Cookie"))
+                response(chain, 200)
+            }
+        }
+        http.get("https://site.test/", headers.newBuilder().set("User-Agent", "old-UA").set("Cookie", "site=private").build()).close()
+    }
+
+    @Test
     fun cancellationDuringSpacingSendsNoRequest() = runBlocking {
         policy.beforeRequest("site.test")
         val waiting = CompletableDeferred<Unit>()

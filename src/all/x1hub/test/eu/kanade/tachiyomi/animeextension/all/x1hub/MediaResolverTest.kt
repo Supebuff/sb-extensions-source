@@ -89,6 +89,21 @@ class MediaResolverTest {
     }
 
     @Test
+    fun handsOffWireUserAgentAndFinalHostCookies() = runBlocking {
+        val resolver = resolver { chain ->
+            val wire = response(chain).newBuilder()
+                .request(chain.request().newBuilder().header("User-Agent", "wire-UA").header("Cookie", "cdn_ticket=test").build())
+                .body("".toResponseBody()).build()
+            response(chain).newBuilder().networkResponse(wire).build()
+        }
+        val result = resolver.resolve("https://cdn.test/media", headers)
+        assertEquals("wire-UA", result.headers["User-Agent"])
+        assertEquals("cdn_ticket=test", result.headers["Cookie"])
+        assertNull(result.headers["Range"])
+        assertNull(result.headers["Host"])
+    }
+
+    @Test
     fun closesAndReadsOnlyPrefixWhenServerIgnoresRange() = runBlocking {
         val body = CountingBody(signature + ByteArray(1024 * 1024))
         val resolver = resolver { response(it, 200, body) }

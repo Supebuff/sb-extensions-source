@@ -35,12 +35,15 @@ class LiveSiteTest {
             }
             assertTrue(listing("$base/search/?q=zxqv1234567890unmatched").items.isEmpty())
             val video = requireNotNull(sample)
-            val html = http.get(video.url, headers).use { it.body.string() }
-            assertTrue(Parser.details(html, video.url).title.isNotBlank())
-            val streams = Parser.streams(html, video.url)
+            val videoUrl = System.getenv("X1HUB_LIVE_VIDEO_URL").orEmpty().ifBlank { video.url }
+            require(videoUrl.startsWith("$base/videos/")) { "Expected an X1hub video page" }
+            val html = http.get(videoUrl, headers).use { it.body.string() }
+            val details = Parser.details(html, videoUrl)
+            assertTrue(details.title.isNotBlank())
+            val streams = Parser.streams(html, videoUrl)
             assertTrue(streams.isNotEmpty())
             for (stream in streams.take(2)) {
-                val media = MediaResolver(http).resolve(stream.url, headers.newBuilder().set("Referer", video.url).build())
+                val media = MediaResolver(http).resolve(stream.url, headers.newBuilder().set("Referer", videoUrl).build())
                 assertTrue(media.headers["Range"] == null)
                 println("Live media resolution: ${stream.label}, redirect resolved=${media.url != stream.url}, MP4 prefix verified")
                 val rangeHeaders = media.headers.newBuilder().set("Range", "bytes=0-1023").build()
@@ -52,7 +55,7 @@ class LiveSiteTest {
                     println("Live media: ${stream.label}, HTTP ${response.code}, MP4 ftyp, 1024 bytes")
                 }
             }
-            video.thumbnail?.let { cover ->
+            details.thumbnail?.let { cover ->
                 http.get(cover, headers).use { response ->
                     assertTrue("Expected image", response.header("Content-Type").orEmpty().startsWith("image/"))
                     assertTrue(response.body.source().readByteArray(16).isNotEmpty())

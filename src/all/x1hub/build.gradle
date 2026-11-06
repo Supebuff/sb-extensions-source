@@ -1,7 +1,7 @@
 ext {
     extName = 'X1hub'
     extClass = '.X1hub'
-    extVersionCode = 2
+    extVersionCode = 3
     isNsfw = true
 }
 
@@ -23,4 +23,5 @@ dependencies {
 
 tasks.withType(Test).configureEach {
     inputs.property('x1hubLiveTest', providers.environmentVariable('X1HUB_LIVE_TEST').orElse('0'))
+    inputs.property('x1hubLiveVideoUrl', providers.environmentVariable('X1HUB_LIVE_VIDEO_URL').orElse(''))
 }

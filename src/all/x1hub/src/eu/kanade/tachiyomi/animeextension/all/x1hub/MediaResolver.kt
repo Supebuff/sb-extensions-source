@@ -39,13 +39,17 @@ internal class MediaResolver(private val http: HttpClient) {
             val playbackHeaders = headers.newBuilder()
                 .removeAll("Range")
                 .removeAll("If-Range")
+                .removeAll("Cookie")
                 .apply {
                     if (response.request.url.host != url.toHttpUrl().host) {
-                        removeAll("Cookie")
                         removeAll("Authorization")
                         removeAll("Proxy-Authorization")
                     }
-                    response.request.header("User-Agent")?.let { set("User-Agent", it) }
+                    val actualRequest = response.requestOnWire
+                    actualRequest.header("User-Agent")?.let { set("User-Agent", it) }
+                    // Only the final host's successful request cookies are handed to the player.
+                    // HttpClient removes website credentials before every cross-host redirect.
+                    actualRequest.header("Cookie")?.let { set("Cookie", it) }
                 }
                 .build()
             Media(response.request.url.toString(), playbackHeaders)
