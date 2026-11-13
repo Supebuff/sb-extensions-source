@@ -6,11 +6,11 @@ import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.animesource.model.Video
 
-internal const val PREF_BASE_URL_DEFAULT = "https://av1encodes.com"
+internal const val PREF_BASE_URL_DEFAULT = "https://animealpha.cc"
 internal const val PREF_DOMAIN_KEY = "preferred_domain"
 internal const val PREF_DOMAIN_DEFAULT = PREF_BASE_URL_DEFAULT
-internal val DOMAIN_ENTRIES = arrayOf("av1encodes.com (default)", "av1please.com (mirror)")
-internal val DOMAIN_VALUES = arrayOf("https://av1encodes.com", "https://av1please.com")
+internal val DOMAIN_ENTRIES = arrayOf("animealpha.cc (default)")
+internal val DOMAIN_VALUES = arrayOf("https://animealpha.cc")
 
 internal const val PREF_QUALITY_KEY = "preferred_quality"
 internal val QUALITY_ENTRIES = arrayOf("1080p", "720p", "480p", "360p")
