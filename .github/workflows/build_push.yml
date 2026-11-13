@@ -52,6 +52,11 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color .github/workflows/build_push.yml .github/workflows/delete_merged_branch.yml
       - name: Test CI selection, signing, and branch cleanup
         run: python -m unittest discover -s .github/tests -v
+      - name: Test challenge gateway API and transport
+        working-directory: services/challenge-gateway
+        run: |
+          python -m pip install -r requirements-test.txt
+          python -m unittest discover -s tests -v
       - name: Select build modules
         id: plan
         env:
@@ -101,6 +106,7 @@ jobs:
           done
           if [[ "$CHUNK_NUMBER" == 1 ]]; then
             tasks+=(":core:testDebugUnitTest")
+            tasks+=(":lib:challenge-gateway:testDebugUnitTest")
           fi
           bash ./gradlew "${tasks[@]}" -PunsignedRelease=true --no-daemon --continue --stacktrace --max-workers=2 -Dorg.gradle.jvmargs=-Xmx3g -Pkotlin.compiler.execution.strategy=in-process
       - name: Upload build artifacts
