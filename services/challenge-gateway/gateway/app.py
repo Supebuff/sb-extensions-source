@@ -44,8 +44,8 @@ async def cancellable(request, operation):
 
 def create_app(key=None, backends=None):
     key = key if key is not None else os.environ.get("GATEWAY_API_KEY", "")
-    if len(key) < 32:
-        raise RuntimeError("GATEWAY_API_KEY must contain at least 32 characters")
+    if len(key) < 32 or not key.isascii() or any(ord(char) < 33 or ord(char) > 126 for char in key):
+        raise RuntimeError("GATEWAY_API_KEY must contain at least 32 printable ASCII characters")
     if backends is None:
         site = Site("x1hub", "https://www.x1hub.com/", frozenset({"www.x1hub.com", "x1hub.com"}),
                     frozenset(filter(None, os.environ.get("GATEWAY_X1HUB_MEDIA_HOSTS", "").lower().split(","))))

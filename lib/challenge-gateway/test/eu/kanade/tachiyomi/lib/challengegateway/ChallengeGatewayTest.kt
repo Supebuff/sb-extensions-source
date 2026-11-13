@@ -112,7 +112,7 @@ class ChallengeGatewayTest {
         listOf("http://192.168.1.2:8787", "http://10.0.0.1", "http://100.64.0.1", "https://gateway.test").forEach {
             ChallengeGateway.validateEndpoint(it)
         }
-        listOf("http://public.test", "https://user:password@gateway.test", "https://gateway.test/path", "https://gateway.test/?key=secret").forEach {
+        listOf("http://public.test", "http://10.0.0.1.example", "https://user:password@gateway.test", "https://gateway.test/path", "https://gateway.test/?key=secret").forEach {
             assertTrue(runCatching { ChallengeGateway.validateEndpoint(it) }.isFailure)
         }
     }

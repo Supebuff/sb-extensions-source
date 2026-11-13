@@ -145,8 +145,9 @@ class ChallengeGateway(
                 "服務位址只能包含協定、主機及連接埠。"
             }
             val host = url.host
-            val parts = host.split('.').mapNotNull(String::toIntOrNull)
-            val privateIp = parts.size == 4 && parts.all { it in 0..255 } && (
+            val labels = host.split('.')
+            val parts = labels.mapNotNull(String::toIntOrNull)
+            val privateIp = labels.size == 4 && parts.size == 4 && parts.all { it in 0..255 } && (
                 parts[0] == 10 || parts[0] == 127 ||
                     (parts[0] == 192 && parts[1] == 168) ||
                     (parts[0] == 172 && parts[1] in 16..31) ||
