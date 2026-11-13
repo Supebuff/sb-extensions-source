@@ -2,8 +2,11 @@ plugins {
     alias(kei.plugins.library)
 }
 
-android.sourceSets.named("test") {
-    java.setSrcDirs(listOf("test"))
+extensions.configure<com.android.build.api.dsl.LibraryExtension> {
+    sourceSets.named("test") {
+        java.directories.add("test")
+        kotlin.directories.add("test")
+    }
 }
 
 dependencies {
