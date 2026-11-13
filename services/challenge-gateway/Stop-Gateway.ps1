@@ -11,7 +11,8 @@ if ($process -and $process.CommandLine.Contains('run.py') -and $process.CommandL
     try {
         Invoke-RestMethod -Method Post -Uri "http://${address}:$($config.port)/v1/shutdown" `
             -Headers @{ Authorization = "Bearer $($config.api_key)" } -TimeoutSec 5 | Out-Null
-        Wait-Process -Id $gatewayPid -Timeout 25 -ErrorAction Stop
+        $running = Get-Process -Id $gatewayPid -ErrorAction SilentlyContinue
+        if ($running) { $running | Wait-Process -Timeout 25 -ErrorAction Stop }
     } catch {
         if (-not $Force) { throw 'Graceful stop failed; use -Force only to terminate this managed gateway and its browser children.' }
         & taskkill.exe /PID $gatewayPid /T /F | Out-Null

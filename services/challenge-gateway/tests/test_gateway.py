@@ -73,7 +73,8 @@ class SecurityTests(unittest.TestCase):
 class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.backend = FakeBackend()
-        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(KEY, {"x1hub": self.backend})),
+        self.app = create_app(KEY, {"x1hub": self.backend})
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),
                                         base_url="http://gateway.test")
         self.auth = {"Authorization": "Bearer " + KEY}
 
@@ -143,8 +144,58 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                                           json={"urls": [MEDIA] * 101, "kind": "media", "referer": PAGE})
         self.assertEqual(422, response.status_code)
 
+    async def test_shutdown_requires_key_and_calls_server_callback(self):
+        stopped = []
+        self.app.state.shutdown = lambda: stopped.append(True)
+        self.assertEqual(401, (await self.client.post("/v1/shutdown")).status_code)
+        self.assertEqual([], stopped)
+        self.assertEqual(200, (await self.client.post("/v1/shutdown", headers=self.auth)).status_code)
+        self.assertEqual([True], stopped)
+
+    async def test_stream_failure_still_releases_transport_and_slot(self):
+        class BrokenStream(Stream):
+            async def __aiter__(self):
+                yield b"part"
+                raise OSError("synthetic stream interruption")
+        self.backend.stream = BrokenStream()
+        path = await self.ticket(MEDIA, "media")
+        with self.assertRaises(Exception):
+            await self.client.get(path)
+        self.assertTrue(self.backend.stream.closed)
+        self.assertEqual(2, self.backend.streams._value)
+        self.backend.transport.aclose.assert_awaited_once()
+
 
 class BackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_image_requests_share_one_browser_fetch(self):
+        backend = ScraplingBackend(SITE)
+        backend.page = SimpleNamespace(is_closed=lambda: False, evaluate=AsyncMock(return_value={
+            "status": 200, "type": "image/jpeg", "data": "anBlZw==",
+        }))
+        with patch("gateway.backend.public_addresses", AsyncMock(return_value=["1.1.1.1"])):
+            first, second = await asyncio.gather(backend.image(IMAGE), backend.image(IMAGE))
+        self.assertEqual((b"jpeg", "image/jpeg"), first)
+        self.assertEqual(first, second)
+        backend.page.evaluate.assert_awaited_once()
+
+    async def test_cancelling_browser_image_closes_its_session(self):
+        backend = ScraplingBackend(SITE)
+        entered = asyncio.Event()
+        async def stalled(*args):
+            entered.set()
+            await asyncio.sleep(60)
+        backend.page = SimpleNamespace(is_closed=lambda: False, evaluate=stalled)
+        session = SimpleNamespace(close=AsyncMock())
+        backend.session = session
+        with patch("gateway.backend.public_addresses", AsyncMock(return_value=["1.1.1.1"])):
+            task = asyncio.create_task(backend.image(IMAGE))
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        session.close.assert_awaited_once()
+        self.assertIsNone(backend.session)
+
     async def test_dns_rejects_loopback_ipv6_and_mixed_answers(self):
         for addresses in (["127.0.0.1"], ["::1"], ["::ffff:127.0.0.1"], ["1.1.1.1", "192.168.1.2"]):
             answer = [(None, None, None, None, (value, 443)) for value in addresses]
