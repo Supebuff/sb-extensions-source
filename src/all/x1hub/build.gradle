@@ -1,7 +1,7 @@
 ext {
     extName = 'X1hub'
     extClass = '.X1hub'
-    extVersionCode = 3
+    extVersionCode = 4
     isNsfw = true
 }
 
@@ -15,6 +15,7 @@ android.sourceSets {
 }
 
 dependencies {
+    implementation(project(":lib:challenge-gateway"))
     testImplementation(libs.junit)
     testImplementation(libs.jsoup)
     testImplementation(libs.okhttp)

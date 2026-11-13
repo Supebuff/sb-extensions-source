@@ -1,5 +1,15 @@
 # 插件技術與踩坑紀錄
 
+## 2026-11-14 Scrapling 網關試點
+
+- 使用者已要求實作並選擇目前 Windows 電腦，X1hub 升至 16.4；來源／套件 ID 與既有作品、集數網址保留，直連為預設選項。
+- `lib/challenge-gateway` 定義 API v1 薄用戶端，傳輸獨立於宿主 Cloudflare 攔截器；頁面保留原站 URL 供既有 Parser 解析，圖片與影片取得個別簽章票證。服務金鑰不傳給來源或播放器。
+- `services/challenge-gateway` 使用 Scrapling 0.5.1 持續會話取得頁面／縮圖；各站隔離 backend。整批圖片序列共用會話、合併重複擷取並有大小／TTL／總量限制。MP4 以 HTTPX 背壓串流轉送，逐跳公開 DNS 檢查及 IP 固定，按目標 URL 篩選瀏覽器 Cookie，保留 Range／206／Content-Range／416／HEAD，取消時關閉上游並釋放串流額度。
+- HTTPX 與瀏覽器的 TLS 指紋不同；不能保證 Cookie／UA 即足以通過所有媒體主機驗證。初始 CDN 主機需明確允許，本站公開媒體入口的重新導向僅能指向公開位址。拒絕非本站頁面、非影片縮圖、私有媒體 DNS 及網關重新導向，不轉交 API 金鑰、手機 Cookie 或 Authorization。
+- Windows 背景啟動不常駐可見視窗，不讀取個人 Chrome profile、不自動開機啟動或新增防火牆例外。私有設定與金鑰位於 checkout 外；啟停及本機設定工具見 [操作說明](../services/challenge-gateway/README.md)。
+- 開發樣本通過列表、整批 24 張圖片及影片起始／位移後兩段 1024 bytes。沒有本站真實挑戰成功解除的證據，未手機實測。原站媒體 URL 到期仍需重新開播，未實作串流中自動刷新。其他來源未接入，不能推定相容。
+- 網關離線測試涵蓋金鑰、票證竄改／到期／跨站、DNS、Range／HEAD、跨主機 Cookie 隔離、冷卻、取消與串流清理；與 Kotlin 傳輸、X1hub、core 測試及 APK 建置整合至 CI。歷史方案比較保留於 [評估紀錄](X1HUB_CLOUDFLARE_OPTIONS.md)。
+
 本檔用於開發交接與跨插件比對，先收錄本 fork 的木瓜與 X1hub；其他來源在新增或實際維護時依末尾格式追加。核對基準為 2026-11-05 的程式碼與本次對話提供的手機回報，並非上游整個片庫的驗證報告。
 
 ## 文件分工與更新時機

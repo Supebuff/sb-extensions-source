@@ -7,9 +7,10 @@ For source-specific implementation differences, troubleshooting evidence, and de
 ## Automatic checks
 
 - Validate the build and merged-branch cleanup workflows with actionlint, and run offline CI selection, signing, and branch cleanup regression tests.
+- Run the challenge gateway's offline Python API/transport tests in `services/challenge-gateway`; these require only its `requirements-test.txt`, not Chrome or a live website. A failure blocks CI.
 - Build APKs only for extensions added by this fork, identified by comparing module build files with `origin/upstream`. Currently these are `zh/mugua` and `all/x1hub`; newly added modules are discovered automatically.
 - Within that scope, select affected extensions and transitive dependents. Core, build configuration, and CI changes rebuild fork-added extensions without building the upstream catalog. The normal `changed` scope excludes documentation in the locations below; documentation-only and upstream-extension-only changes skip APK builds.
-- Run each selected extension's JVM unit tests and the existing core JVM unit tests in the first build chunk.
+- Run each selected extension's JVM unit tests, plus core and `lib:challenge-gateway` JVM tests in the first build chunk.
 - Build unsigned Release APKs on trusted `dev` pushes/manual runs. Sign them in a separate job using a fixed key, verify their signatures and the pinned certificate, then upload verified APKs.
 - PRs and manual runs on other branches build Debug APKs for testing and never receive signing credentials.
 - Publish verified APKs, launcher icons and the AniZen-compatible catalogue to the dedicated `repo` branch after trusted `dev` signing succeeds.
@@ -86,6 +87,8 @@ The signing job requires this Secret. Missing/invalid credentials, a failed APK 
 The initial transition from earlier randomly signed Debug APKs requires reinstalling the extension once because those APKs have different signer identities. Back up AniZen first and remove only the affected extension, keeping the AniZen application. Subsequent APKs signed with this fixed key and a higher version code can update normally. APK fingerprints alone cannot recover a missing private key.
 
 ## Local checks
+
+Scrapling service setup, Windows background operation, connection settings, and the explicitly enabled live probe are documented in [Challenge gateway](../services/challenge-gateway/README.md). The service and its API key are not embedded in APKs or published to `repo`; the signed X1hub APK contains only the optional gateway client.
 
 Requires Python 3.12+ and Git:
 
