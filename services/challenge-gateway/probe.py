@@ -4,6 +4,8 @@ import html
 import json
 import re
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -36,6 +38,7 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--live", action="store_true", required=True)
     parser.add_argument("--images", type=int, default=24)
+    parser.add_argument("--image-workers", type=int, choices=(1, 2, 4), default=1)
     args = parser.parse_args()
     if not 1 <= args.images <= 32:
         parser.error("--images must be between 1 and 32")
@@ -46,11 +49,14 @@ def main():
     from lxml.html import fromstring
     stats = {"page": False, "images": 0, "media_range": False, "media_seek": False,
              "phone_playback": "not tested", "challenge_solving": "not established by this probe"}
+    timings = {"pages_ms": [], "images_ms": [], "media_ms": []}
     with httpx.Client(base_url=base, timeout=110, trust_env=False) as client:
         def page(url):
+            started = time.monotonic()
             response = client.get("/v1/sites/x1hub/page", params={"url": url}, headers=auth)
             if response.status_code != 200:
                 raise RuntimeError(f"page HTTP {response.status_code}")
+            timings["pages_ms"].append(round((time.monotonic() - started) * 1000))
             return response.content
 
         def tickets(urls, kind, referer):
@@ -73,11 +79,17 @@ def main():
                 value = next((image.get(key) for key in ("data-original", "data-src", "src") if image.get(key)), None)
                 if value:
                     images.append(urljoin(latest, value))
-        for path in tickets(images, "image", latest):
+        def image(path):
+            started = time.monotonic()
             response = client.get(path)
             if response.status_code != 200 or not response.headers.get("content-type", "").startswith("image/"):
                 raise RuntimeError(f"image HTTP {response.status_code}")
-            stats["images"] += 1
+            return round((time.monotonic() - started) * 1000)
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=args.image_workers) as workers:
+            timings["images_ms"] = list(workers.map(image, tickets(images, "image", latest)))
+        timings["image_batch_ms"] = round((time.monotonic() - started) * 1000)
+        stats["images"] = len(timings["images_ms"])
         video_page = urljoin(latest, links[0].get("href"))
         body = page(video_page).decode("utf-8")
         match = re.search(r"\bvar\s+flashvars\s*=\s*\{([\s\S]*?)\}\s*;", body)
@@ -87,6 +99,7 @@ def main():
                      if re.fullmatch(r"video_(?:url|alt_url[0-9]*)", key) and fields.get(key + "_redirect") != "1")
         path = tickets([urljoin(video_page, media)], "media", video_page)[0]
         for offset, label in ((0, "media_range"), (1024, "media_seek")):
+            started = time.monotonic()
             with client.stream("GET", path, headers={"Range": f"bytes={offset}-{offset + 1023}"}) as response:
                 if response.status_code != 206 or not response.headers.get("content-range", "").startswith(f"bytes {offset}-"):
                     raise RuntimeError(f"{label} HTTP {response.status_code}")
@@ -94,6 +107,8 @@ def main():
                 if len(content) != 1024 or (offset == 0 and content[4:8] != b"ftyp"):
                     raise RuntimeError("invalid MP4 range")
                 stats[label] = True
+                timings["media_ms"].append(round((time.monotonic() - started) * 1000))
+        stats["timings"] = timings
         print(json.dumps(stats))
 
 
