@@ -5,6 +5,8 @@
 - 成人來源：`isNsfw = true`。目前版本為 `16.5`，套件 ID 為 `eu.kanade.tachiyomi.animeextension.all.x1hub`。
 - 相容目標：AniZen 0.5.220；沿用本倉庫 v16 來源介面及宿主提供的依賴。
 
+2026-11-14 狀態：16.5 的[正式 CI／簽名／套件庫發布](https://github.com/Supebuff/sb-extensions-source/actions/runs/43598796954)已成功，目前仍待此版本的手機列表、圖片與播放回報。完整已確認及待確認項目見[專案現況](../../../docs/CURRENT_STATUS.md)。
+
 ## 功能與設定
 
 - 熱門：網站的 Most Viewed；最新：Latest。

@@ -17,6 +17,7 @@
 
 ## 先讀哪些檔案
 
+- [docs/CURRENT_STATUS.md](docs/CURRENT_STATUS.md)：最新發布、已確認驗證範圍、服務操作狀態及仍待手機確認的項目。
 - [docs/CI.md](docs/CI.md)：建置範圍、正式簽名、產物與操作方式。
 - [docs/EXTENSION_NOTES.md](docs/EXTENSION_NOTES.md)：各來源的技術差異、共通流程、踩坑證據及裝置驗證狀態。
 - [development_guide.md](development_guide.md)、[CONTRIBUTING.md](CONTRIBUTING.md)：專案結構與開發慣例；其中舊路徑、數量或上游連結須以實際檔案核對。
@@ -68,3 +69,12 @@
 
 - 將來源專屬的行為與限制寫入該套件 README；技術決策、踩坑原因與手機回報摘要同步至 `docs/EXTENSION_NOTES.md`，註明日期、版本、證據及仍待確認的部分。CI 操作寫入 `docs/CI.md`；此檔只保留長期適用的專案規則。
 - 文件記錄重要決策及可查證的檔案／提交／CI 參考，避免堆積完整對話、重複日誌或過期狀態。
+
+<!-- synaptic:start -->
+<!-- synaptic-skill v1.2.0 -->
+## Synaptic
+This repo has a Synaptic code graph (`synaptic-out/graph.json`): query it before
+broad file/grep exploration and before editing depended-on code. CLI `synaptic
+query "<q>"`, `affected <node>`, `predict <files>`; or the **synaptic** MCP tools.
+Rebuild: `synaptic extract .` / `synaptic update <files>`.
+<!-- synaptic:end -->

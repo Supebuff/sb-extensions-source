@@ -16,6 +16,8 @@ This repository contains the source code for various anime extensions.
 
 本 fork 的套件庫為 **Supebuff Extensions**，提供木瓜、X1hub 與後續新增的自有套件。`dev` 維護原始碼，`upstream` 同步上游，`repo` 發布通過固定簽名驗證的 APK、圖示與索引。
 
+最新發布、Scrapling 網關與手機驗證進度見[專案現況](docs/CURRENT_STATUS.md)。
+
 ## 🚀 How to Add the Repository
 
 ### Option 1: Automatic
