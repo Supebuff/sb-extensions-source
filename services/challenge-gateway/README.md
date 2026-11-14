@@ -1,6 +1,6 @@
 # Scrapling challenge gateway
 
-X1hub 16.4 的選用外部網關，宿主相容基準為 AniZen 0.5.220。API 與 Kotlin 用戶端可由後續來源共用；首版只啟用 X1hub，不會接管第三方插件。各網站必須新增獨立 `Site`／backend，不能共用 Cookie。
+X1hub 16.4 起提供的選用外部網關，宿主相容基準為 AniZen 0.5.220。API 與 Kotlin 用戶端可由後續來源共用；首版只啟用 X1hub，不會接管第三方插件。各網站必須新增獨立 `Site`／backend，不能共用 Cookie。
 
 ## Windows 執行
 
@@ -19,13 +19,15 @@ C:\path\gateway-venv\Scripts\python.exe -m pip install -r services\challenge-gat
 
 `StateDirectory` 必須位於原始碼 checkout 之外。首次啟動自動建立 `config.json`，包含隨機 API 金鑰、`bind`、`port`、`real_chrome` 和可選的 `x1hub_media_hosts`（精確 HTTPS CDN 主機清單，不接受萬用字元）。設定檔及 PID／日誌都留在此私有目錄；不要提交、上傳或貼出金鑰。瀏覽器使用獨立暫存 profile，不讀取個人 Chrome 登入或永久保存來源 Cookie。
 
-在手機更新至 X1hub 16.4 後，開啟來源設定，填入「Scrapling 服務位址」及「Scrapling 服務金鑰」。以下工具可在本機顯示位址並複製金鑰，避免把金鑰寫進聊天或文件：
+在手機更新至 X1hub 16.5 後，開啟來源設定，填入「Scrapling 服務位址」及「Scrapling 服務金鑰」。由 16.4 更新可沿用相同設定與 API v1 服務。以下工具可在本機顯示位址並複製金鑰，避免把金鑰寫進聊天或文件：
 
 ```powershell
 & .\services\challenge-gateway\Show-Connection.ps1 -StateDirectory C:\path\gateway-private
 ```
 
 服務位址留空即使用原有直連流程；已填位址但連線或驗證失敗會明確報錯，不會悄悄退回手機直連或回傳空列表。金鑰不會傳給來源網站。切換位址／模式後重新整理列表及詳情；已儲存的舊縮圖網址不會立即重寫。網關模式的服務端間隔為 0.5 秒；原有「同一主機請求間隔」設定只控制手機直連。
+
+16.5 用戶端遇到可辨識的 TCP 失敗／重設／過早關閉時，對讀取頁面及無持久副作用的票證建立最多額外嘗試一次，等待 350 毫秒後使用新連線池。這不會重送影片串流、慢速瀏覽器讀取或 HTTP 錯誤回應，也不會把取消當成可重試錯誤。持續失敗會顯示去除敏感資訊的分類代碼：`HTTP_BLOCKED`（明文政策）、`ACCESS_DENIED`（系統權限）、`DNS_FAILED`、`TLS_FAILED`、`NO_ROUTE`、`HTTP_PROTOCOL`、`TIMEOUT`、`CONNECT_FAILED`、`CONNECTION_CLOSED`、`CONNECTION_RESET` 或 `IO_FAILED`。單次恢復的回歸測試涵蓋真實 TCP 中斷、票證 POST 重播、嘗試次數上限、敏感訊息隔離及重試前／進行中的取消。
 
 手機使用同一區域網路時，需能連到所選電腦位址／連接埠。若 Windows 防火牆阻擋，僅允許此 Python 程序在私用設定檔、所需的本地位址與手機來源範圍連入。此專案不自動建立廣泛的防火牆例外或路由器連接埠轉送。行動數據需要使用者另行設定可到達這台電腦的私人 VPN／隧道；公開主機的插件設定必須使用 HTTPS。HTTP 私有網路模式亦受宿主 Android 的明文連線政策影響。
 
