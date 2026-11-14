@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -6,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from gateway.app import cancellable, create_app
-from gateway.backend import ScraplingBackend
+from gateway.backend import ABORT_IMAGE_JS, ScraplingBackend
 from gateway.security import GatewayError, Site, Tickets, public_addresses
 
 KEY = "test-key-" * 8
@@ -167,24 +168,63 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resource_page_bootstraps_once_and_stays_available_during_navigation(self):
+        backend = ScraplingBackend(SITE)
+        backend.page = SimpleNamespace(is_closed=lambda: False)
+        page = SimpleNamespace(is_closed=lambda: False, route=AsyncMock(), unroute=AsyncMock(),
+                               route_web_socket=AsyncMock(), goto=AsyncMock(), close=AsyncMock())
+        context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+        backend.session = SimpleNamespace(context=context)
+        self.assertIs(page, await backend._image_page())
+        bootstrap = page.route.await_args_list[0].args[1]
+        route = SimpleNamespace(request=SimpleNamespace(url=SITE.home, is_navigation_request=lambda: True),
+                                fulfill=AsyncMock())
+        await bootstrap(route)
+        route.fulfill.assert_awaited_once()
+        backend._guard = AsyncMock()
+        route.request.url = "https://untrusted.test/"
+        await bootstrap(route)
+        backend._guard.assert_awaited_once_with(route)
+        async with backend.lock:
+            self.assertIs(page, await asyncio.wait_for(backend._image_page(), 0.5))
+        context.new_page.assert_awaited_once()
+        page.unroute.assert_awaited_once_with("**/*", bootstrap)
+
+    async def test_cancelled_resource_page_initialization_closes_only_new_tab(self):
+        backend = ScraplingBackend(SITE)
+        backend.page = SimpleNamespace(is_closed=lambda: False)
+        page = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock(), close=AsyncMock(),
+                               goto=AsyncMock(side_effect=asyncio.CancelledError))
+        session = SimpleNamespace(context=SimpleNamespace(new_page=AsyncMock(return_value=page)), close=AsyncMock())
+        backend.session = session
+        with self.assertRaises(asyncio.CancelledError):
+            await backend._image_page()
+        page.close.assert_awaited_once()
+        session.close.assert_not_awaited()
+        self.assertIsNone(backend.resource_page)
+
     async def test_repeated_image_requests_share_one_browser_fetch(self):
         backend = ScraplingBackend(SITE)
-        backend.page = SimpleNamespace(is_closed=lambda: False, evaluate=AsyncMock(return_value={
+        page = SimpleNamespace(is_closed=lambda: False, evaluate=AsyncMock(return_value={
             "status": 200, "type": "image/jpeg", "data": "anBlZw==",
         }))
+        backend._image_page = AsyncMock(return_value=page)
         with patch("gateway.backend.public_addresses", AsyncMock(return_value=["1.1.1.1"])):
             first, second = await asyncio.gather(backend.image(IMAGE), backend.image(IMAGE))
         self.assertEqual((b"jpeg", "image/jpeg"), first)
         self.assertEqual(first, second)
-        backend.page.evaluate.assert_awaited_once()
+        page.evaluate.assert_awaited_once()
 
-    async def test_cancelling_browser_image_closes_its_session(self):
+    async def test_cancelling_image_aborts_only_its_fetch_and_preserves_session(self):
         backend = ScraplingBackend(SITE)
         entered = asyncio.Event()
-        async def stalled(*args):
+        async def stalled(script, argument):
+            if script == ABORT_IMAGE_JS:
+                return
             entered.set()
             await asyncio.sleep(60)
-        backend.page = SimpleNamespace(is_closed=lambda: False, evaluate=stalled)
+        page = SimpleNamespace(evaluate=AsyncMock(side_effect=stalled))
+        backend._image_page = AsyncMock(return_value=page)
         session = SimpleNamespace(close=AsyncMock())
         backend.session = session
         with patch("gateway.backend.public_addresses", AsyncMock(return_value=["1.1.1.1"])):
@@ -193,8 +233,80 @@ class BackendTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
-        session.close.assert_awaited_once()
-        self.assertIsNone(backend.session)
+        session.close.assert_not_awaited()
+        self.assertIs(session, backend.session)
+        calls = page.evaluate.await_args_list
+        self.assertEqual(ABORT_IMAGE_JS, calls[1].args[0])
+        self.assertEqual(calls[0].args[1]["id"], calls[1].args[1])
+        page.evaluate.side_effect = None
+        page.evaluate.return_value = {"status": 200, "type": "image/jpeg", "data": "anBlZw=="}
+        with patch("gateway.backend.public_addresses", AsyncMock(return_value=["1.1.1.1"])):
+            self.assertEqual((b"jpeg", "image/jpeg"), await backend.image(IMAGE))
+
+    async def test_stalled_images_do_not_block_media_and_concurrency_is_bounded(self):
+        backend = ScraplingBackend(SITE)
+        backend.page = SimpleNamespace(is_closed=lambda: False)
+        backend.session = SimpleNamespace(context=SimpleNamespace(cookies=AsyncMock(return_value=[])))
+        entered, release = asyncio.Event(), asyncio.Event()
+        running = maximum = 0
+        async def fetch(*args):
+            nonlocal running, maximum
+            running += 1
+            maximum = max(maximum, running)
+            if running == 2:
+                entered.set()
+            try:
+                await release.wait()
+                return {"status": 200, "type": "image/jpeg", "data": "anBlZw=="}
+            finally:
+                running -= 1
+        backend._image_page = AsyncMock(return_value=SimpleNamespace(evaluate=fetch))
+        backend.wait = AsyncMock()
+        # Avoid incidental stripe collisions in this concurrency test.
+        urls = {}
+        for index in range(100):
+            url = IMAGE + f"?sample={index}"
+            urls.setdefault(hash(url) % 32, url)
+        transport = httpx.AsyncClient(transport=httpx.MockTransport(lambda request:
+            httpx.Response(206, headers={"content-type": "video/mp4"}, stream=Stream())))
+        with patch("gateway.backend.public_addresses", AsyncMock(return_value=["1.1.1.1"])), \
+                patch("gateway.backend.httpx.AsyncClient", return_value=transport):
+            tasks = [asyncio.create_task(backend.image(url)) for url in list(urls.values())[:3]]
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                response, _, opened = await asyncio.wait_for(backend.media(MEDIA, PAGE, "bytes=0-7"), 2)
+                await response.aclose()
+                await opened.aclose()
+                backend.streams.release()
+                self.assertFalse(any(task.done() for task in tasks))
+            finally:
+                release.set()
+                await asyncio.gather(*tasks)
+        self.assertEqual(2, maximum)
+
+    async def test_cancelling_navigation_preserves_resource_page_and_context(self):
+        backend = ScraplingBackend(SITE)
+        backend.session = SimpleNamespace(close=AsyncMock(), close_pages=AsyncMock())
+        backend.resource_page = object()
+        backend._page = AsyncMock(side_effect=asyncio.CancelledError)
+        with self.assertRaises(asyncio.CancelledError):
+            await backend.page_html(PAGE)
+        backend.session.close_pages.assert_awaited_once()
+        backend.session.close.assert_not_awaited()
+        self.assertIsNotNone(backend.resource_page)
+
+    async def test_pacing_stays_serial_and_rechecks_cooldown_after_wait(self):
+        backend = ScraplingBackend(SITE)
+        async def start():
+            await backend.wait("site.test")
+            return time.monotonic()
+        starts = await asyncio.gather(*(start() for _ in range(3)))
+        self.assertTrue(all(second - first >= 0.45 for first, second in zip(starts, starts[1:])))
+        cooling = asyncio.create_task(backend.wait("site.test"))
+        await asyncio.sleep(0.05)
+        backend.cooldowns["site.test"] = time.monotonic() + 60
+        with self.assertRaises(GatewayError):
+            await cooling
 
     async def test_dns_rejects_loopback_ipv6_and_mixed_answers(self):
         for addresses in (["127.0.0.1"], ["::1"], ["::ffff:127.0.0.1"], ["1.1.1.1", "192.168.1.2"]):
@@ -263,6 +375,69 @@ class BackendTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(GatewayError):
                 await backend.media(MEDIA, PAGE, None)
         self.assertEqual(2, backend.streams._value)
+
+    async def test_media_target_cache_skips_entry_and_refreshes_expired_target_once(self):
+        backend = ScraplingBackend(SITE)
+        backend.page = SimpleNamespace(is_closed=lambda: False)
+        backend.session = SimpleNamespace(context=SimpleNamespace(cookies=AsyncMock(return_value=[])))
+        backend.wait = AsyncMock()
+        seen, clients = [], []
+        statuses = iter([302, 206, 206, 403, 302, 206, 429])
+        def handle(request):
+            seen.append((request.headers["host"], request.headers["range"]))
+            status = next(statuses)
+            headers = {"location": "https://cdn.test/video.mp4"} if status == 302 else {"content-type": "video/mp4"}
+            return httpx.Response(status, headers=headers, stream=Stream())
+        client_type = httpx.AsyncClient
+        def client(**kwargs):
+            value = client_type(transport=httpx.MockTransport(handle))
+            clients.append(value)
+            return value
+        dns = AsyncMock(return_value=["1.1.1.1"])
+        with patch("gateway.backend.httpx.AsyncClient", side_effect=client), \
+                patch("gateway.backend.public_addresses", dns):
+            try:
+                for index in range(3):
+                    response, _, opened = await backend.media(MEDIA, PAGE, f"bytes={index}-7")
+                    await response.aclose()
+                    await opened.aclose()
+                    backend.streams.release()
+                    if index == 0:
+                        expiry = backend.media_targets[(MEDIA, PAGE)][0]
+                    elif index == 1:
+                        self.assertEqual(expiry, backend.media_targets[(MEDIA, PAGE)][0])
+                with self.assertRaises(GatewayError) as caught:
+                    await backend.media(MEDIA, PAGE, "bytes=3-7")
+                self.assertEqual(429, caught.exception.status)
+            finally:
+                for value in clients:
+                    await value.aclose()
+        self.assertEqual(["site.test", "cdn.test", "cdn.test", "cdn.test", "site.test", "cdn.test", "cdn.test"],
+                         [host for host, _ in seen])
+        self.assertEqual(["bytes=0-7"] * 2 + ["bytes=1-7"] + ["bytes=2-7"] * 3 + ["bytes=3-7"],
+                         [value for _, value in seen])
+        self.assertEqual(7, dns.await_count)
+        self.assertEqual(2, backend.streams._value)
+
+    async def test_expired_media_target_is_resolved_from_original_entry(self):
+        backend = ScraplingBackend(SITE)
+        backend.page = SimpleNamespace(is_closed=lambda: False)
+        backend.session = SimpleNamespace(context=SimpleNamespace(cookies=AsyncMock(return_value=[])))
+        backend.media_targets[(MEDIA, PAGE)] = (time.monotonic() - 1, "https://cdn.test/stale.mp4")
+        backend.wait = AsyncMock()
+        seen = []
+        def handle(request):
+            seen.append(request.headers["host"])
+            return httpx.Response(206, headers={"content-type": "video/mp4"}, stream=Stream())
+        transport = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        with patch("gateway.backend.httpx.AsyncClient", return_value=transport), \
+                patch("gateway.backend.public_addresses", AsyncMock(return_value=["1.1.1.1"])):
+            response, _, opened = await backend.media(MEDIA, PAGE, "bytes=0-7")
+            await response.aclose()
+            await opened.aclose()
+            backend.streams.release()
+        self.assertEqual(["site.test"], seen)
+        self.assertNotIn((MEDIA, PAGE), backend.media_targets)
 
 
 if __name__ == "__main__":
