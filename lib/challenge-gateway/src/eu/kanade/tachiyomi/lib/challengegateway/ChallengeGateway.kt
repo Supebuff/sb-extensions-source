@@ -153,20 +153,19 @@ class ChallengeGateway(
         )
     }
 
-    private suspend fun exchange(client: OkHttpClient, request: Request): Response =
-        suspendCancellableCoroutine { continuation ->
-            val call = client.newCall(request)
-            continuation.invokeOnCancellation { call.cancel() }
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(e)
-                }
+    private suspend fun exchange(client: OkHttpClient, request: Request): Response = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
 
-                override fun onResponse(call: Call, response: Response) {
-                    continuation.resume(response) { _, abandoned, _ -> abandoned.close() }
-                }
-            })
-        }
+            override fun onResponse(call: Call, response: Response) {
+                continuation.resume(response) { _, abandoned, _ -> abandoned.close() }
+            }
+        })
+    }
 
     companion object {
         fun validateEndpoint(value: String): HttpUrl {
