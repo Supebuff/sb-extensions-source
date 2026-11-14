@@ -1,5 +1,8 @@
 package eu.kanade.tachiyomi.lib.challengegateway
 
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -12,6 +15,7 @@ import kotlinx.serialization.json.put
 import okhttp3.Authenticator
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.ConnectionPool
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -30,6 +34,7 @@ class ChallengeGateway(
     private val apiKey: String,
     private val site: String,
     client: OkHttpClient = OkHttpClient(),
+    private val pauseBeforeRetry: suspend () -> Unit = { delay(350) },
 ) {
     private val base = validateEndpoint(endpoint)
     private val transport = client.newBuilder()
@@ -111,18 +116,28 @@ class ChallengeGateway(
         .header("Cache-Control", "no-store")
 
     private suspend fun execute(request: Request): Response {
-        val response = suspendCancellableCoroutine { continuation ->
-            val call = transport.newCall(request)
-            continuation.invokeOnCancellation { call.cancel() }
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(IOException("無法連線網關，請確認電腦在線及服務位址。", e))
-                }
-
-                override fun onResponse(call: Call, response: Response) {
-                    continuation.resume(response) { _, abandoned, _ -> abandoned.close() }
-                }
-            })
+        val response = try {
+            exchange(transport, request)
+        } catch (error: IOException) {
+            currentCoroutineContext().ensureActive()
+            val failure = GatewayConnectionFailure(error)
+            val body = request.body
+            val replayable = request.method == "GET" || (
+                request.method == "POST" && request.url.encodedPath == "/v1/sites/$site/tickets" &&
+                    body != null && !body.isOneShot() && !body.isDuplex()
+                )
+            if (!replayable || !failure.recoverable) throw failure.exception(error)
+            pauseBeforeRetry()
+            currentCoroutineContext().ensureActive()
+            // A retry must not reuse another stale idle connection. Its pool closes every
+            // connection on release; other concurrent gateway calls retain their own pool.
+            val fresh = transport.newBuilder().connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS)).build()
+            try {
+                exchange(fresh, request)
+            } catch (retryError: IOException) {
+                currentCoroutineContext().ensureActive()
+                throw GatewayConnectionFailure(retryError).exception(retryError)
+            }
         }
         if (response.isSuccessful) return response
         val status = response.code
@@ -136,6 +151,20 @@ class ChallengeGateway(
                 else -> "網關回應 HTTP $status，請稍後重試或檢查服務狀態。"
             },
         )
+    }
+
+    private suspend fun exchange(client: OkHttpClient, request: Request): Response = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                continuation.resume(response) { _, abandoned, _ -> abandoned.close() }
+            }
+        })
     }
 
     companion object {

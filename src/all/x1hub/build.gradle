@@ -1,7 +1,7 @@
 ext {
     extName = 'X1hub'
     extClass = '.X1hub'
-    extVersionCode = 4
+    extVersionCode = 5
     isNsfw = true
 }
 
