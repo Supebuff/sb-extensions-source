@@ -1,48 +1,33 @@
 # 專案現況
 
-確認時間：**2026-11-14 22:35（Asia/Taipei）**。此頁記錄當次核對結果；裝置與服務狀態不代表持續監控。相容基準為 AniZen 0.5.220、Android 16。
+最後核對於 **2026-11-18 23:14（Asia/Taipei）**。相容基準為 AniZen 0.5.220、Android 16。
 
-## 已交付
+## 已發布與目前環境
 
-| 項目 | 目前狀態 | 證據／入口 |
+| 項目 | 現況 | 證據／入口 |
 | --- | --- | --- |
-| X1hub | **16.5**，固定簽名 APK 與套件庫索引已發布；套件／來源 ID 保留 | [APK](https://raw.githubusercontent.com/Supebuff/sb-extensions-source/repo/apk/aniyomi-all.x1hub-v16.5-release.apk)、[來源說明](../src/all/x1hub/README.md) |
-| 木瓜 | 套件庫目前發布 **16.6** | [來源說明](../src/zh/mugua/README.md) |
-| Scrapling 網關 | API v1；Windows 服務已套用圖片取消／排隊及媒體轉址快取修正，健康檢查正常 | [操作、量測與限制](../services/challenge-gateway/README.md) |
-| 共用 Kotlin 用戶端 | X1hub 已接入頁面、圖片票證及 MP4 票證；其他來源尚未接入 | `lib/challenge-gateway` |
-| Synaptic | 1.2.0，已註冊此專案專用 MCP 並實際查詢成功；使用本機唯讀分析 | [專案工作指引](../AGENTS.md#synaptic) |
+| X1hub | **16.6**（版號代碼 6）已發布，本次 ADB 查驗也確認手機已安裝 16.6。Scrapling 模式會合併同一影片的取頁請求，開播可重用 20 秒內的播放資料。 | [APK](https://raw.githubusercontent.com/Supebuff/sb-extensions-source/repo/apk/aniyomi-all.x1hub-v16.6-release.apk) · [PR #5](https://github.com/Supebuff/sb-extensions-source/pull/5) · [來源說明](../src/all/x1hub/README.md) |
+| 木瓜 | 套件庫發布 **16.6**。 | [來源說明](../src/zh/mugua/README.md) |
+| Scrapling 網關 | Windows 服務以日常模式背景執行。本次電腦直接呼叫 `/healthz` 回傳 `status: ok`、`api: 1`。實機量測完成後已關閉分段記錄。 | [網關操作說明](../services/challenge-gateway/README.md) |
+| 共用 Kotlin 用戶端 | X1hub 已接入頁面、圖片票證與 MP4 票證。其他來源尚未接入。 | [共用模組](../lib/challenge-gateway/) |
+| 專案技能 | 已加入 Scrapling Official 0.5.1、Gradle Best Practices 1.0.1，以及可透過 ADB 收集手機日誌的診斷 Skill。Synaptic 1.2.0 專用 MCP 可查詢本專案。 | [PR #4](https://github.com/Supebuff/sb-extensions-source/pull/4) · [診斷操作](../.agents/skills/gateway-and-streaming-diagnostics/references/measurement.md) |
 
-X1hub 16.5 的功能程式基準為 [7984f74](https://github.com/Supebuff/sb-extensions-source/commit/7984f74f2f0eb23ffd6cabf766e6f8c8fe9563ab)，由 [PR #2](https://github.com/Supebuff/sb-extensions-source/pull/2)合併。可辨識的 TCP 連線失敗／重設／過早關閉，會等待 350 毫秒後以新連線額外嘗試一次；持續失敗呈現固定分類代碼。原網關位址、金鑰及 API v1 可沿用。
+## 已驗證
 
-晚間效能修正只更動電腦服務，APK 仍為 16.5。圖片改用同一會話的單一資源頁，最多兩張並行，單張取消不清除整個驗證會話；媒體成功轉址按入口＋Referer 快取 60 秒，DNS／Cookie／Range 檢查保留。
-
-## 已確認的驗證範圍
-
-| 類型 | 結果及界線 |
+| 類型 | 結果 |
 | --- | --- |
-| 16.5 正式 CI | [CI 43598796954](https://github.com/Supebuff/sb-extensions-source/actions/runs/43598796954)整體成功，含 Release APK 建置、固定簽名／憑證驗證與套件庫發布 |
-| JVM 回歸 | 共用網關用戶端、X1hub 與 core 測試通過；涵蓋實際 loopback TCP 中斷、GET／票證 POST 重播、嘗試次數上限、敏感訊息遮蔽及重試前後取消 |
-| Python／CI 工具 | 17 項網關離線測試、54 項 CI 工具回歸及工作流程 lint 通過 |
-| 網站／HTTP 樣本 | 開發端經網關取得列表、24 張縮圖及影片起始／位移後各 1024 bytes 的有效 MP4；另一次帶金鑰的熱門列表請求 HTTP 200，約 6.3 秒 |
-| 手機網路 | 使用者確認手機瀏覽器可取得網關健康回應，來源設定的位址正確 |
-| 16.4 手機列表／圖片 | 使用者回報列表偶發連線失敗、刷新後恢復；20:54 日誌有 6 筆網關圖片磁碟快取成功及其後 6 筆記憶體快取成功 |
-| 晚間手機延遲 | 使用者確認縮圖與開播慢；22:16 日誌有約 5.5 秒圖片請求、MPV 載入到首幀約 14 秒，尚未核對日誌中的插件版號 |
-| 網關效能修正 | 本機 24 項離線測試通過；實站四張圖片與兩段 1 KiB Range 成功。Range 樣本約 4688／5422 → 1125／625 ms；圖片整批約 1531 → 1672 ms，未觀察到一般批次明顯加速 |
+| X1hub 16.6 建置與發布 | 43 項本機 JVM 測試通過。CI 通過 Android 建置、X1hub／共用網關／core 測試、固定簽名及套件庫發布。[發布 CI](https://github.com/Supebuff/sb-extensions-source/actions/runs/44331425133) |
+| 網關診斷 | 26 項網關離線測試通過，已用兩輪實站圖片與 1 KiB Range 樣本驗證快取分類、首塊及正常完成。其後也在手機上實際收集 ADB 與網關計時。[診斷 CI](https://github.com/Supebuff/sb-extensions-source/actions/runs/44318860686) |
+| X1hub 16.5 手機基準 | 2026-11-18，手機透過 Wi-Fi 可存取網關。熱門與最新列表成功，10 筆縮圖網路請求均為 HTTP 200。內建 MPV 有 4 次有效首幀紀錄，約 **4.11 至 9.01 秒**。 |
+| 16.5 同片 720p 對照 | 相隔約 18 秒重播。開播前取頁 **6.61 → 6.27 秒**，第一個影片 Range 首塊 **1.44 → 0.94 秒**，MPV 開始載入至首幀 **4.54 → 4.11 秒**。重播的第一個 Range 命中轉址快取。 |
 
-16.5 功能 CI 的 APK 範圍為 X1hub；木瓜 16.6 是既有發布版本。晚間服務效能修正不產生新 APK。網路樣本不是固定加速比例，亦不等於手機更新服務後的首幀、長時間播放或全片庫通過。
+手機數據記錄的是 **16.5** 的小樣本。MPV 首幀從播放器開始載入算起，另有一段播放前取頁的等待。[實作背景與歷史量測](EXTENSION_NOTES.md)
 
 ## 尚待確認
 
-- **16.5 手機回報**：尚未確認已安裝此版後，首次進入列表、閒置後返回、刷新、分頁及縮圖是否持續正常。
-- **原始連線失敗根因**：兩份手機日誌均未保留該次失敗的例外堆疊，不能認定為失效連線重用、AdGuard 或其他特定原因。16.5 提供有界恢復及分類診斷，仍需現場驗證改善效果。
-- **效能修正後的手機表現**：重新整理列表、連續捲動／取消縮圖及實際首幀時間仍待回報；最新日誌有一次首幀與 seek 完成證據，但不能替代更新服務後的驗證。
-- **手機媒體流程**：內建與外部播放器的換畫質、續播、下載、長時間播放及連結到期恢復尚待逐項確認；先前 16.1 的結果不沿用為新版通過證據。
-- **真實 Cloudflare 挑戰**：尚無本站實際提出挑戰且 Scrapling 自動解開的成功紀錄。
-- **行動數據／切網路**：手機到網關的私人 VPN／隧道路由尚未驗證，不能只憑同一區域網路可用就推定行動數據可用。
+- **優先驗收 16.6 共用影片頁。** 開啟詳情後在 20 秒內播放同一影片，核對網關只擷取一次影片頁，同時量測「按播放到首幀」。超過 20 秒再播及手動刷新詳情應重新取頁。保留同一手機、影片、畫質及網路作對照。
+- **持續使用。** 分頁、閒置後返回、快速捲動取消縮圖、換畫質、續播、下載、外部播放器與長時間播放仍待逐項確認。
+- **連線失敗與切網路。** 先前偶發列表失敗的根因未定；若再出現，記錄畫面上的錯誤分類代碼、操作及時間。手機切換網路或經私人 VPN 連網關仍待實測。
+- **真實網站驗證。** 尚無本站提出 Cloudflare 挑戰且 Scrapling 自動解開的成功紀錄。
 
-## 操作與後續追查
-
-- 網關保持電腦在線；目前為手動背景啟動，沒有設定開機啟動、排程、對外連接埠轉送或自動防火牆例外。Windows 啟停與連線設定工具見[網關說明](../services/challenge-gateway/README.md#windows-執行)。
-- 服務金鑰及私有設定保留在 checkout 外，不放入本頁、程式庫、聊天或公開產物。原始手機日誌及帶權杖的媒體網址不加入倉庫。
-- 下一次手機連線失敗，優先記錄 16.5 的畫面分類代碼、操作與時間；在同一次 App 執行期間匯出日誌，區分列表、圖片與播放問題。
-- 技術原因、限制及歷史證據見[插件技術紀錄](EXTENSION_NOTES.md)，正式建置／簽名／發布操作見 [CI 說明](CI.md)。
+網關目前以手動方式啟動。測試時可依診斷 Skill 暫時開啟分段記錄，完成後恢復日常模式。服務金鑰、原始手機日誌及帶權杖的網址保留在倉庫外。[啟停與設定](../services/challenge-gateway/README.md#windows-執行)

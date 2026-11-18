@@ -19,7 +19,7 @@ C:\path\gateway-venv\Scripts\python.exe -m pip install -r services\challenge-gat
 
 `StateDirectory` 必須位於原始碼 checkout 之外。首次啟動自動建立 `config.json`，包含隨機 API 金鑰、`bind`、`port`、`real_chrome` 和可選的 `x1hub_media_hosts`（精確 HTTPS CDN 主機清單，不接受萬用字元）。設定檔及 PID／日誌都留在此私有目錄；不要提交、上傳或貼出金鑰。瀏覽器使用獨立暫存 profile，不讀取個人 Chrome 登入或永久保存來源 Cookie。
 
-在手機更新至 X1hub 16.5 後，開啟來源設定，填入「Scrapling 服務位址」及「Scrapling 服務金鑰」。由 16.4 更新可沿用相同設定與 API v1 服務。以下工具可在本機顯示位址並複製金鑰，避免把金鑰寫進聊天或文件：
+安裝目前發布的 X1hub 後，開啟來源設定，填入「Scrapling 服務位址」及「Scrapling 服務金鑰」。16.4 起的網關設定與 API v1 服務可沿用，發布版見[專案現況](../../docs/CURRENT_STATUS.md)。以下工具可在本機顯示位址並複製金鑰，避免把金鑰寫進聊天或文件：
 
 ```powershell
 & .\services\challenge-gateway\Show-Connection.ps1 -StateDirectory C:\path\gateway-private
