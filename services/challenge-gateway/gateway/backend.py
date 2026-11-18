@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
 from .security import GatewayError, public_addresses
+from .timing import measure, queued, tag
 
 IMAGE_JS = """async ({url, id}) => {
   const pending = globalThis.__gatewayImages ||= new Map();
@@ -114,12 +115,13 @@ class ScraplingBackend:
             raise GatewayError(502, f"來源回應 HTTP {status}；驗證未完成或資源已失效。")
 
     async def wait(self, host):
-        async with self.pacing:
-            await asyncio.sleep(max(0, self.next_request - time.monotonic()))
-            remaining = self.cooldowns.get(host, 0) - time.monotonic()
-            if remaining > 0:
-                raise GatewayError(429, "來源仍在冷卻，請稍後再試。", max(1, int(remaining + 1)))
-            self.next_request = time.monotonic() + 0.5
+        with measure("pacing_ms"):
+            async with self.pacing:
+                await asyncio.sleep(max(0, self.next_request - time.monotonic()))
+                remaining = self.cooldowns.get(host, 0) - time.monotonic()
+                if remaining > 0:
+                    raise GatewayError(429, "來源仍在冷卻，請稍後再試。", max(1, int(remaining + 1)))
+                self.next_request = time.monotonic() + 0.5
 
     async def _page(self, url):
         host = self.site.validate(url)
@@ -138,7 +140,8 @@ class ScraplingBackend:
             self.page = page
             self.user_agent = await page.evaluate("navigator.userAgent")
 
-        response = await session.fetch(url, page_setup=setup, page_action=capture)
+        with measure("navigation_ms"):
+            response = await session.fetch(url, page_setup=setup, page_action=capture)
         if not guarded or self.page is None:
             raise GatewayError(502, "瀏覽器會話未完成初始化。")
         self.site.validate(str(response.url))
@@ -164,13 +167,13 @@ class ScraplingBackend:
             raise
 
     async def page_html(self, url):
-        async with self.lock:
+        async with queued(self.lock):
             return await self._navigate(url)
 
     async def _image_page(self):
         if self.resource_page is not None and not self.resource_page.is_closed():
             return self.resource_page
-        async with self.lock:
+        async with queued(self.lock):
             if self.resource_page is not None and not self.resource_page.is_closed():
                 return self.resource_page
             if self.page is None or self.page.is_closed():
@@ -199,18 +202,21 @@ class ScraplingBackend:
     async def image(self, url):
         host = self.site.validate(url, "image")
         # Bounded stripes coalesce duplicate URLs without an unbounded lock registry.
-        async with self.image_locks[hash(url) % len(self.image_locks)]:
+        async with queued(self.image_locks[hash(url) % len(self.image_locks)]):
             cached = self.images.get(url)
             if cached and cached[0] > time.monotonic():
+                tag("cache", "hit")
                 self.images.move_to_end(url)
                 return cached[1:]
-            async with self.image_slots:
+            tag("cache", "miss")
+            async with queued(self.image_slots):
                 await public_addresses(host)
                 page = await self._image_page()
                 await self.wait(host)
                 request_id = uuid4().hex
                 try:
-                    result = await page.evaluate(IMAGE_JS, {"url": url, "id": request_id})
+                    with measure("image_fetch_ms"):
+                        result = await page.evaluate(IMAGE_JS, {"url": url, "id": request_id})
                 except asyncio.CancelledError:
                     # Cancel only this fetch; keep clearance and other images alive.
                     with anyio.CancelScope(shield=True):
@@ -242,11 +248,13 @@ class ScraplingBackend:
         else:
             cached = None
             self.media_targets.pop(key, None)
-        await self.streams.acquire()
+        tag("cache", "hit" if cached else "miss")
+        with measure("queue_ms"):
+            await self.streams.acquire()
         transport = None
         response = None
         try:
-            async with self.lock:
+            async with queued(self.lock):
                 if self.page is None or self.page.is_closed():
                     await self._navigate(referer)
                 context = self.session.context
@@ -254,6 +262,7 @@ class ScraplingBackend:
             # HTTPX pulls chunks on demand, so a slow player cannot buffer an entire movie.
             transport = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15), trust_env=False)
             for redirects in range(6):
+                tag("upstream_attempts", redirects + 1)
                 host = self.site.validate(url, "media", redirect=redirects > 0 or cached is not None)
                 addresses = await public_addresses(host)
                 await self.wait(host)
@@ -270,8 +279,10 @@ class ScraplingBackend:
                 target = httpx.URL(url).copy_with(host=addresses[0])
                 outgoing = transport.build_request(method, target, headers=headers,
                                                     extensions={"sni_hostname": host})
-                response = await transport.send(outgoing, stream=True, follow_redirects=False)
+                with measure("upstream_headers_ms"):
+                    response = await transport.send(outgoing, stream=True, follow_redirects=False)
                 if cached and response.status_code in (403, 404, 410):
+                    tag("cache", "refresh")
                     # An expired CDN target may be resolved from the original entry once.
                     await response.aclose()
                     self.media_targets.pop(key, None)

@@ -49,7 +49,7 @@ def main():
     from lxml.html import fromstring
     stats = {"page": False, "images": 0, "media_range": False, "media_seek": False,
              "phone_playback": "not tested", "challenge_solving": "not established by this probe"}
-    timings = {"pages_ms": [], "images_ms": [], "media_ms": []}
+    timings = {"pages_ms": [], "images_ms": [], "media_ms": [], "range_headers_ms": [], "range_first_body_ms": []}
     with httpx.Client(base_url=base, timeout=110, trust_env=False) as client:
         def page(url):
             started = time.monotonic()
@@ -101,9 +101,16 @@ def main():
         for offset, label in ((0, "media_range"), (1024, "media_seek")):
             started = time.monotonic()
             with client.stream("GET", path, headers={"Range": f"bytes={offset}-{offset + 1023}"}) as response:
+                timings["range_headers_ms"].append(round((time.monotonic() - started) * 1000, 2))
                 if response.status_code != 206 or not response.headers.get("content-range", "").startswith(f"bytes {offset}-"):
                     raise RuntimeError(f"{label} HTTP {response.status_code}")
-                content = b"".join(response.iter_bytes())
+                content = bytearray()
+                for chunk in response.iter_raw():
+                    if not content:
+                        timings["range_first_body_ms"].append(round((time.monotonic() - started) * 1000, 2))
+                    if len(content) + len(chunk) > 1024:
+                        raise RuntimeError("invalid MP4 range size")
+                    content.extend(chunk)
                 if len(content) != 1024 or (offset == 0 and content[4:8] != b"ftyp"):
                     raise RuntimeError("invalid MP4 range")
                 stats[label] = True

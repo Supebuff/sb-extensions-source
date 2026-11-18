@@ -80,6 +80,8 @@ python services\challenge-gateway\probe.py --config C:\path\gateway-private\conf
 
 Android 用戶端測試為 `:lib:challenge-gateway:testDebugUnitTest`；X1hub／core 既有測試、Release 建置與固定簽名沿用主 CI。Python 網關測試加入 CI prepare，失敗會阻止整體 CI 成功。
 
+需要量測網關內部排隊、瀏覽器擷取、轉址與首塊時，可用 `run.py --config <私有設定> --timing-log <倉庫外的新 JSONL 檔>` 暫時開啟分段計時。搭配 [診斷 Skill 的量測程序](../../.agents/skills/gateway-and-streaming-diagnostics/references/measurement.md) 匯總，並對照已匯出的 AniZen 日誌或即時 ADB 收集。網關只寫入識別碼、時間、狀態、快取與請求類型，不記錄標頭、網址或票證。
+
 2026-11-14 的開發樣本已取得列表、24 張縮圖，以及影片起始／位移後的兩段 1024 bytes，均符合預期。此煙霧測試沒有建立真實 Cloudflare 挑戰自動解開的證據，也不等於手機起播、長時間播放、切網路、下載或外部播放器已驗證。其他來源必須逐一接入及實測，不會因啟動此服務而自動生效。
 
 同日效能修正的小樣本：修正前兩段 1 KiB Range 約 4688／5422 ms，修正後約 1125／625 ms；四張圖片整批分別約 1531／1672 ms，沒有觀察到一般圖片批次明顯加速。來源網路與快取會影響耗時，不能把這組結果當成固定加速比例或手機首幀時間；圖片改動主要避免取消重建會話及跨工作互相等待。此更新只改電腦服務，沿用 API v1、原金鑰及 X1hub 16.5，需重啟服務載入。
