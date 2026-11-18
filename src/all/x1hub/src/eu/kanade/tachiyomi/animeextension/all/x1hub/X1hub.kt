@@ -124,16 +124,16 @@ class X1hub : Source() {
     override fun animeDetailsRequest(anime: SAnime): Request = Request.Builder().url(absoluteUrl(anime.url)).headers(headers).build()
 
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
-        val url = absoluteUrl(anime.url)
+        val sourceUrl = absoluteUrl(anime.url)
         val session = currentGateway()
         val details = if (session != null) {
-            session.videoPages.details(url).details.getOrThrow()
+            session.videoPages.details(sourceUrl).details.getOrThrow()
         } else {
-            http.get(url, headers).use { response ->
+            http.get(sourceUrl, headers).use { response ->
                 Parser.details(response.body.string(), response.request.url.toString())
             }
         }
-        val cover = thumbnails(listOf(details.thumbnail), url, session?.service).first()
+        val cover = thumbnails(listOf(details.thumbnail), sourceUrl, session?.service).first()
         return SAnime.create().apply {
             url = anime.url
             title = details.title
