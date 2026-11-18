@@ -22,6 +22,7 @@ import okhttp3.OkHttpClient
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import java.io.IOException
+import java.security.MessageDigest
 
 class X1hub : Source() {
     override val name = "X1hub"
@@ -35,21 +36,41 @@ class X1hub : Source() {
     private val http by lazy { HttpClient(client, policy) }
     // Independent transport: host Cloudflare interceptors/cookies must not touch the gateway.
     private val gatewayTransport by lazy { OkHttpClient() }
-    private fun gateway(): ChallengeGateway? {
+    private class GatewaySession(val endpoint: String, val keyDigest: ByteArray, val service: ChallengeGateway) {
+        val videoPages = VideoPages { url ->
+            service.page(url).use { response -> VideoPage(response.body.string(), response.request.url.toString()) }
+        }
+    }
+
+    private var gatewaySession: GatewaySession? = null
+
+    @Synchronized
+    private fun currentGateway(): GatewaySession? {
         val endpoint = preferences.getString(PREF_GATEWAY, "").orEmpty().trim()
-        if (endpoint.isEmpty()) return null
+        if (endpoint.isEmpty()) {
+            gatewaySession = null
+            return null
+        }
+        val key = preferences.getString(PREF_GATEWAY_KEY, "").orEmpty()
+        val keyDigest = MessageDigest.getInstance("SHA-256").digest(key.toByteArray())
+        gatewaySession?.let {
+            if (it.endpoint == endpoint && it.keyDigest.contentEquals(keyDigest)) return it
+        }
+        gatewaySession = null
         return try {
-            ChallengeGateway(endpoint, preferences.getString(PREF_GATEWAY_KEY, "").orEmpty(), "x1hub", gatewayTransport)
+            GatewaySession(endpoint, keyDigest, ChallengeGateway(endpoint, key, "x1hub", gatewayTransport))
+                .also { gatewaySession = it }
         } catch (error: IllegalArgumentException) {
             throw IOException("請確認 Scrapling 服務位址及金鑰設定。", error)
         }
     }
 
-    private suspend fun page(url: String, cache: CacheControl = CacheControl.Builder().maxAge(5, java.util.concurrent.TimeUnit.MINUTES).build()) =
-        gateway()?.page(url) ?: http.get(url, headers, cache)
+    private fun gateway(): ChallengeGateway? = currentGateway()?.service
 
-    private suspend fun thumbnails(urls: List<String?>, referer: String): List<String?> {
-        val service = gateway() ?: return urls
+    private suspend fun page(url: String) = gateway()?.page(url) ?: http.get(url, headers)
+
+    private suspend fun thumbnails(urls: List<String?>, referer: String, service: ChallengeGateway? = gateway()): List<String?> {
+        if (service == null) return urls
         val originals = urls.filterNotNull().distinct()
         val converted = originals.zip(service.assets(originals, "image", referer)).toMap()
         return urls.map { converted[it] }
@@ -103,10 +124,16 @@ class X1hub : Source() {
     override fun animeDetailsRequest(anime: SAnime): Request = Request.Builder().url(absoluteUrl(anime.url)).headers(headers).build()
 
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
-        val details = page(absoluteUrl(anime.url)).use { response ->
-            Parser.details(response.body.string(), response.request.url.toString())
+        val url = absoluteUrl(anime.url)
+        val session = currentGateway()
+        val details = if (session != null) {
+            session.videoPages.details(url).details.getOrThrow()
+        } else {
+            http.get(url, headers).use { response ->
+                Parser.details(response.body.string(), response.request.url.toString())
+            }
         }
-        val cover = thumbnails(listOf(details.thumbnail), absoluteUrl(anime.url)).first()
+        val cover = thumbnails(listOf(details.thumbnail), url, session?.service).first()
         return SAnime.create().apply {
             url = anime.url
             title = details.title
@@ -147,16 +174,25 @@ class X1hub : Source() {
         return video.copy(videoUrl = media.url, headers = media.headers)
     }
 
-    private suspend fun videos(url: String): List<Video> = page(absoluteUrl(url), CacheControl.FORCE_NETWORK).use { response ->
-        val pageUrl = response.request.url.toString()
-        val videoHeaders = headers.newBuilder().set("Referer", pageUrl).apply {
-            response.requestOnWire.header("User-Agent")?.let { set("User-Agent", it) }
-        }.build()
-        val streams = Parser.streams(response.body.string(), pageUrl)
-        val service = gateway()
-        val urls = service?.assets(streams.map { it.url }, "media", pageUrl) ?: streams.map { it.url }
-        streams.mapIndexed { index, stream ->
-            Video(videoUrl = urls[index], videoTitle = stream.label, headers = if (service == null) videoHeaders else Headers.EMPTY, preferred = index == 0)
+    private suspend fun videos(url: String): List<Video> {
+        val sourceUrl = absoluteUrl(url)
+        val session = currentGateway()
+        if (session != null) {
+            val page = session.videoPages.playback(sourceUrl)
+            val streams = page.streams.getOrThrow()
+            val urls = session.service.assets(streams.map { it.url }, "media", page.url)
+            return streams.mapIndexed { index, stream ->
+                Video(videoUrl = urls[index], videoTitle = stream.label, headers = Headers.EMPTY, preferred = index == 0)
+            }
+        }
+        return http.get(sourceUrl, headers, CacheControl.FORCE_NETWORK).use { response ->
+            val pageUrl = response.request.url.toString()
+            val videoHeaders = headers.newBuilder().set("Referer", pageUrl).apply {
+                response.requestOnWire.header("User-Agent")?.let { set("User-Agent", it) }
+            }.build()
+            Parser.streams(response.body.string(), pageUrl).mapIndexed { index, stream ->
+                Video(videoUrl = stream.url, videoTitle = stream.label, headers = videoHeaders, preferred = index == 0)
+            }
         }
     }
 
@@ -172,7 +208,7 @@ class X1hub : Source() {
             "• 熱門、最新、關鍵字搜尋及分頁。\n" +
                 "• 常用分類：搜尋文字留空時套用。\n" +
                 "• 影片詳情、分類／標籤及單集播放。\n" +
-                "• 公開 MP4 畫質：開播時重新取得連結，排除登入跳轉。\n" +
+                "• 公開 MP4 畫質：Scrapling 模式短時間沿用剛取得的播放資訊，排除登入跳轉。\n" +
                 "• 選定畫質後解析最終媒體網址，減少播放經過網站驗證入口。\n" +
                 "• 網站頁面請求間隔與限流冷卻。\n" +
                 "• 選用 Scrapling 服務取得頁面、縮圖及影片；電腦需在線。",
