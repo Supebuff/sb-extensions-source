@@ -13,6 +13,7 @@ from starlette.background import BackgroundTask
 
 from .backend import ScraplingBackend
 from .security import GatewayError, Site, Tickets
+from .timing import measure, tag
 
 
 class TicketRequest(BaseModel):
@@ -102,6 +103,7 @@ def create_app(key=None, backends=None):
         authenticate(request)
         backend = backend_for(site)
         backend.site.validate(url)
+        tag("kind", "page")
         html, source_url = await cancellable(request, backend.page_html(url))
         return Response(html, media_type="text/html", headers={"X-Source-Url": source_url})
 
@@ -110,6 +112,7 @@ def create_app(key=None, backends=None):
         authenticate(request)
         backend = backend_for(site)
         backend.site.validate(data.referer)
+        tag("kind", "tickets")
         result = []
         for url in data.urls:
             backend.site.validate(url, data.kind)
@@ -123,6 +126,7 @@ def create_app(key=None, backends=None):
         data = tickets.verify(ticket, site)
         backend.site.validate(data["u"], data["k"])
         backend.site.validate(data["r"])
+        tag("kind", data["k"])
         if data["k"] == "image":
             content, mime = await cancellable(request, backend.image(data["u"]))
             return Response(b"" if request.method == "HEAD" else content,
@@ -130,8 +134,10 @@ def create_app(key=None, backends=None):
         range_header = request.headers.get("range")
         if range_header and not re.fullmatch(r"bytes=(?:\d+-\d*|-\d+)", range_header):
             raise GatewayError(416, "僅支援單一位元組範圍。")
-        response, headers, transport = await cancellable(
-            request, backend.media(data["u"], data["r"], range_header, request.method))
+        tag("range", range_header is not None)
+        with measure("media_open_ms"):
+            response, headers, transport = await cancellable(
+                request, backend.media(data["u"], data["r"], range_header, request.method))
 
         closed = False
         async def finish():

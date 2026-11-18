@@ -1,4 +1,6 @@
 import asyncio
+from io import StringIO
+import json
 import time
 import unittest
 from types import SimpleNamespace
@@ -9,6 +11,7 @@ import httpx
 from gateway.app import cancellable, create_app
 from gateway.backend import ABORT_IMAGE_JS, ScraplingBackend
 from gateway.security import GatewayError, Site, Tickets, public_addresses
+from gateway.timing import TimingLog
 
 KEY = "test-key-" * 8
 SITE = Site("x1hub", "https://site.test/", frozenset({"site.test"}))
@@ -71,6 +74,28 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual("cdn.test", SITE.validate("https://cdn.test/a.mp4", "media", redirect=True))
 
 
+class TimingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_after_declared_body_differs_from_midstream_disconnect(self):
+        from gateway.timing import tag
+
+        for sent, outcome in [(b"12345678", "complete"), (b"1234", "disconnected")]:
+            async def stream(scope, receive, send):
+                tag("kind", "media")
+                await send({"type": "http.response.start", "status": 206,
+                            "headers": [(b"content-length", b"8")]})
+                await send({"type": "http.response.body", "body": sent, "more_body": True})
+                await receive()
+                await send({"type": "http.response.body", "body": b""})
+
+            output = StringIO()
+            await TimingLog(stream, output)(
+                {"type": "http", "method": "GET"},
+                AsyncMock(return_value={"type": "http.disconnect"}),
+                AsyncMock(),
+            )
+            self.assertEqual(outcome, json.loads(output.getvalue())["outcome"])
+
+
 class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.backend = FakeBackend()
@@ -116,6 +141,27 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(MEDIA, PAGE, "bytes=0-7", "GET")], self.backend.seen)
         self.assertTrue(self.backend.stream.closed)
         self.backend.transport.aclose.assert_awaited_once()
+        self.assertEqual(2, self.backend.streams._value)
+
+    async def test_opt_in_timing_records_stream_delivery_without_request_data(self):
+        path = await self.ticket(MEDIA, "media")
+        output = StringIO()
+        transport = httpx.ASGITransport(app=TimingLog(self.app, output))
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway.test") as client:
+            self.assertEqual(200, (await client.get("/healthz")).status_code)
+            response = await client.get(path, headers={"Range": "bytes=0-7", "Cookie": "phone=secret"})
+            self.assertEqual(b"test-mp4", response.content)
+            self.assertEqual(206, response.status_code)
+        record = json.loads(output.getvalue())
+        self.assertEqual(("media", True, 206, "complete"),
+                         (record["kind"], record["range"], record["status"], record["outcome"]))
+        self.assertLessEqual(record["media_open_ms"], record["headers_ms"])
+        self.assertLessEqual(record["headers_ms"], record["first_body_ms"])
+        self.assertLessEqual(record["first_body_ms"], record["total_ms"])
+        self.assertNotIn("test-mp4", output.getvalue())
+        self.assertNotIn("phone=secret", output.getvalue())
+        self.assertNotIn(path.split("=", 1)[1], output.getvalue())
+        self.assertNotIn("site.test", output.getvalue())
         self.assertEqual(2, self.backend.streams._value)
 
     async def test_head_and_invalid_range(self):

@@ -1,5 +1,6 @@
 """Run one worker: browser sessions and cooldowns must not split across processes."""
 import argparse
+from contextlib import nullcontext
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--timing-log", type=Path, help="Write timing JSONL to a new file outside the checkout.")
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8-sig"))
     os.environ["GATEWAY_API_KEY"] = config["api_key"]
@@ -19,14 +21,20 @@ def main():
     logging.disable(logging.CRITICAL)
     import uvicorn
     from gateway.app import create_app
+    from gateway.timing import TimingLog
     app = create_app()
-    server = uvicorn.Server(uvicorn.Config(
-        app, host=config.get("bind", "127.0.0.1"), port=config.get("port", 8787),
-        access_log=False, log_config=None, log_level="critical", workers=1, limit_concurrency=32,
-        timeout_graceful_shutdown=15,
-    ))
-    app.state.shutdown = lambda: setattr(server, "should_exit", True)
-    server.run()
+    timing_path = args.timing_log.resolve() if args.timing_log else None
+    if timing_path is not None and timing_path.is_relative_to(Path(__file__).resolve().parents[2]):
+        parser.error("--timing-log must be outside the source checkout")
+    with timing_path.open("x", encoding="utf-8") if timing_path else nullcontext() as output:
+        server = uvicorn.Server(uvicorn.Config(
+            TimingLog(app, output) if output else app,
+            host=config.get("bind", "127.0.0.1"), port=config.get("port", 8787),
+            access_log=False, log_config=None, log_level="critical", workers=1, limit_concurrency=32,
+            timeout_graceful_shutdown=15,
+        ))
+        app.state.shutdown = lambda: setattr(server, "should_exit", True)
+        server.run()
 
 
 if __name__ == "__main__":

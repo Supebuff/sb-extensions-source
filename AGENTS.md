@@ -78,3 +78,11 @@ broad file/grep exploration and before editing depended-on code. CLI `synaptic
 query "<q>"`, `affected <node>`, `predict <files>`; or the **synaptic** MCP tools.
 Rebuild: `synaptic extract .` / `synaptic update <files>`.
 <!-- synaptic:end -->
+
+## 專案 Skills
+
+- `gateway-and-streaming-diagnostics` 提供可執行的網關／MPV 量測。操作見 [SKILL.md](.agents/skills/gateway-and-streaming-diagnostics/SKILL.md)。
+- `scrapling-official` 用於核對 API。維護目前服務時，以 [requirements.txt](services/challenge-gateway/requirements.txt) 的鎖定版本為準。
+- `gradle-best-practices` 用於建置審查。套用建議前，核對本專案的宿主相容性、測試與發布規則。
+
+第三方技能來源為 [Scrapling 官方提交 `2998c9e`](https://github.com/D4Vinci/Scrapling/tree/2998c9ebba52ef6116f0a483c7d2f21908250024/agent-skill/Scrapling-Skill) 與 [Gradle 官方提交 `6d30a9c`](https://github.com/gradle/gradle-skills/tree/6d30a9c0dcf863a421f4a0895e34c6a40c844fb1/skills/gradle-best-practices)。
